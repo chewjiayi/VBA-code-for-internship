@@ -1,0 +1,3526 @@
+Option Explicit
+'========================================================
+' EMAIL DISTRIBUTION LIST (hardcoded)(confirm correct)
+'========================================================
+Private Const TO_ADDR_LIST As String = _
+    "PSAC-AYPD-YP@globalpsa.com;" & _
+    "PSAC-SPD-OFFICERS@globalpsa.com;" & _
+    "PSAC-AYOPD-CCOFFICERS@globalpsa.com;" & _
+    "PSAC-AYOPD-CONTROLCENTRE@globalpsa.com;" & _
+    "PANNERCH@globalpsa.com;" & _
+    "MDSAHB@globalpsa.com"
+
+Private Const CC_ADDR_LIST As String = _
+    "PSAC-SPD-MGMT@globalpsa.com;" & _
+    "HOCC@globalpsa.com;" & _
+    "PSAC-AYOPD-CCOFFICERS@globalpsa.com;" & _
+    "PSAC-PPT4-MGMENT@globalpsa.com;" & _
+    "PSAC-P456SE-SECTION-MGRS@globalpsa.com"
+
+'========================================================
+' TEXT / FIND HELPERS
+'========================================================
+Private Function IsInArray(ByVal needle As String, ByVal haystack As Variant) As Boolean
+    Dim k As Long
+    For k = LBound(haystack) To UBound(haystack)
+        If StrComp(needle, CStr(haystack(k)), vbTextCompare) = 0 Then
+            IsInArray = True
+            Exit Function
+        End If
+    Next k
+    IsInArray = False
+End Function
+
+Private Function RowQualifiesOverstow(ByVal wsFinal As Worksheet, ByVal i As Long, ByVal lastCol As Long) As Boolean
+    Dim j As Long, headerText As String, cellVal As Variant
+    For j = 1 To lastCol
+        headerText = LCase$(Trim$(CStr(wsFinal.Cells(1, j).Value)))
+        Select Case headerText
+            Case "%overstow", "%overstow_inclr", "%overstow_outclr", _
+                 "load overstow", "portmark overstow", "mix weight overstow"
+                cellVal = wsFinal.Cells(i, j).Value
+                If IsNumeric(cellVal) Then
+                    If CDbl(cellVal) > 0 Then RowQualifiesOverstow = True: Exit Function
+                ElseIf Len(Trim$(CStr(cellVal))) > 0 Then
+                    RowQualifiesOverstow = True: Exit Function
+                End If
+        End Select
+    Next j
+    RowQualifiesOverstow = False
+End Function
+
+Private Function CleanText(ByVal v As Variant) As String
+    Dim s As String
+    s = CStr(v)
+    s = Replace(s, Chr(160), " ")
+    s = Replace(s, vbCr, " ")
+    s = Replace(s, vbLf, " ")
+    CleanText = Trim$(s)
+End Function
+
+Private Sub ForceValuesToColumns(ByVal pt As PivotTable)
+    Dim pf As PivotField
+    On Error Resume Next
+    Set pf = pt.DataPivotField
+    On Error GoTo 0
+    If pf Is Nothing Then Exit Sub
+    pf.Orientation = xlColumnField
+    pf.Position = 1
+End Sub
+
+Private Function FindHeaderRow(ByVal ws As Worksheet, ByVal token As String, Optional ByVal maxRows As Long = 120) As Long
+    Dim r As Long, c As Range
+    For r = 1 To maxRows
+        Set c = ws.Rows(r).Find(What:=token, LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+        If Not c Is Nothing Then
+            FindHeaderRow = r
+            Exit Function
+        End If
+    Next r
+    FindHeaderRow = 0
+End Function
+
+Private Function FindHeaderRowExact(ByVal ws As Worksheet, ByVal token As String, Optional ByVal maxRows As Long = 120) As Long
+    Dim r As Long, c As Range
+    For r = 1 To maxRows
+        Set c = ws.Rows(r).Find(What:=token, LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+        If Not c Is Nothing Then
+            FindHeaderRowExact = r
+            Exit Function
+        End If
+    Next r
+    FindHeaderRowExact = 0
+End Function
+
+Private Function FindColByHeader(ByVal ws As Worksheet, ByVal headerRow As Long, ByVal headerText As String) As Long
+    Dim lastCol As Long, c As Long
+    Dim target As String, cur As String
+    target = CleanText(headerText)
+    lastCol = ws.Cells(headerRow, ws.Columns.Count).End(xlToLeft).Column
+    If lastCol < 1 Then lastCol = 1
+    For c = 1 To lastCol
+        cur = CleanText(ws.Cells(headerRow, c).Value)
+        If StrComp(cur, target, vbTextCompare) = 0 Then
+            FindColByHeader = c
+            Exit Function
+        End If
+    Next c
+    FindColByHeader = 0
+End Function
+
+Private Function FindColAny(ByVal ws As Worksheet, ByVal headerRow As Long, ByVal names As Variant) As Long
+    Dim i As Long, col As Long
+    For i = LBound(names) To UBound(names)
+        col = FindColByHeader(ws, headerRow, CStr(names(i)))
+        If col > 0 Then
+            FindColAny = col
+            Exit Function
+        End If
+    Next i
+    FindColAny = 0
+End Function
+
+Private Function LastDataRow(ByVal ws As Worksheet, ByVal keyCol As Long, ByVal headerRow As Long) As Long
+    Dim r As Long
+    r = ws.Cells(ws.Rows.Count, keyCol).End(xlUp).Row
+    If r < headerRow + 1 Then r = headerRow + 1
+    LastDataRow = r
+End Function
+
+Private Function FindColumnContains(ws As Worksheet, txt As String, Optional maxRows As Long = 30) As Long
+    Dim r As Long, f As Range
+    For r = 1 To maxRows
+        Set f = ws.Rows(r).Find(What:=txt, LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+        If Not f Is Nothing Then
+            FindColumnContains = f.Column
+            Exit Function
+        End If
+    Next r
+    FindColumnContains = 0
+End Function
+
+Private Function FindColumnContainsRow(ws As Worksheet, txt As String, Optional maxRows As Long = 50) As Long
+    Dim r As Long, f As Range
+    For r = 1 To maxRows
+        Set f = ws.Rows(r).Find(What:=txt, LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+        If Not f Is Nothing Then
+            FindColumnContainsRow = f.Row
+            Exit Function
+        End If
+    Next r
+    FindColumnContainsRow = 0
+End Function
+
+'========================================================
+' MULTI-VESSEL FILTER HELPER
+'========================================================
+Private Function MatchesAnyVessel(ByVal cellText As String, ByVal filterStr As String) As Boolean
+    If Len(filterStr) = 0 Then
+        MatchesAnyVessel = True
+        Exit Function
+    End If
+    Dim upper As String
+    upper = UCase$(cellText)
+    Dim tokens() As String
+    tokens = Split(filterStr, "|")
+    Dim i As Long
+    For i = LBound(tokens) To UBound(tokens)
+        If Len(tokens(i)) > 0 Then
+            If InStr(1, upper, tokens(i), vbTextCompare) > 0 Then
+                MatchesAnyVessel = True
+                Exit Function
+            End If
+        End If
+    Next i
+    MatchesAnyVessel = False
+End Function
+
+'========================================================
+' DATE FILTER HELPERS
+'========================================================
+' Parses a single "DD/MM/YYYY" token explicitly - does NOT rely on CDate,
+' because CDate's interpretation of "7/4/2026" depends on the Windows
+' regional settings of whoever runs the macro (could mean 7-Apr or 4-Jul).
+' This always means day/month/year, no matter what PC runs it.
+Private Function ParseDDMMYYYY(ByVal token As String, ByRef outDate As Date) As Boolean
+    Dim s As String
+    s = Trim$(token)
+
+    Dim segs() As String
+    segs = Split(s, "/")
+    If UBound(segs) <> 2 Then
+        segs = Split(s, "-")   ' allow DD-MM-YYYY too, just in case
+    End If
+    If UBound(segs) <> 2 Then
+        ParseDDMMYYYY = False
+        Exit Function
+    End If
+
+    If Not IsNumeric(segs(0)) Or Not IsNumeric(segs(1)) Or Not IsNumeric(segs(2)) Then
+        ParseDDMMYYYY = False
+        Exit Function
+    End If
+
+    Dim d As Long, m As Long, y As Long
+    d = CLng(segs(0))
+    m = CLng(segs(1))
+    y = CLng(segs(2))
+    If y < 100 Then y = y + 2000   ' e.g. "26" -> 2026
+
+    If m < 1 Or m > 12 Or d < 1 Or d > 31 Or y < 1900 Or y > 2100 Then
+        ParseDDMMYYYY = False
+        Exit Function
+    End If
+
+    On Error Resume Next
+    Err.Clear
+    outDate = DateSerial(y, m, d)
+    If Err.Number <> 0 Then
+        ParseDDMMYYYY = False
+        Exit Function
+    End If
+    On Error GoTo 0
+
+    ' DateSerial silently rolls over invalid days (e.g. 31/04) into the next
+    ' month - catch that instead of accepting a shifted date.
+    If Month(outDate) <> m Or Day(outDate) <> d Or Year(outDate) <> y Then
+        ParseDDMMYYYY = False
+        Exit Function
+    End If
+
+    ParseDDMMYYYY = True
+End Function
+
+' Parses the user's raw InputBox text into a date filter. Dates are always
+' read as DD/MM/YYYY, regardless of the PC's regional settings.
+' Accepts:
+'   ""                          -> no date filter (all dates)
+'   "15/07/2026"                -> single date
+'   "15/07/2026-20/07/2026"     -> date range (order doesn't matter)
+' Returns False if the text could not be parsed as (a) valid date(s).
+Private Function ParseDateFilterInput(ByVal rawInput As String, _
+                                       ByRef hasDateFilter As Boolean, _
+                                       ByRef dateFrom As Date, _
+                                       ByRef dateTo As Date) As Boolean
+    Dim s As String
+    s = Trim$(rawInput)
+
+    hasDateFilter = False
+    dateFrom = 0
+    dateTo = 0
+    ParseDateFilterInput = True
+
+    If Len(s) = 0 Then Exit Function   ' blank = no filter, still a success
+
+    ' A single date is "DD/MM/YYYY" (two slashes). A range is two of those
+    ' joined by a dash: "DD/MM/YYYY-DD/MM/YYYY". Splitting on "-" is safe
+    ' because dates use "/" as their separator, not "-".
+    Dim parts() As String
+    parts = Split(s, "-")
+
+    If UBound(parts) = 0 Then
+        ' single date
+        If Not ParseDDMMYYYY(parts(0), dateFrom) Then
+            ParseDateFilterInput = False
+            Exit Function
+        End If
+        dateTo = dateFrom
+        hasDateFilter = True
+
+    ElseIf UBound(parts) = 1 Then
+        ' range: "DD/MM/YYYY-DD/MM/YYYY"
+        If Not ParseDDMMYYYY(parts(0), dateFrom) Then
+            ParseDateFilterInput = False
+            Exit Function
+        End If
+        If Not ParseDDMMYYYY(parts(1), dateTo) Then
+            ParseDateFilterInput = False
+            Exit Function
+        End If
+        If dateFrom > dateTo Then
+            Dim tmp As Date
+            tmp = dateFrom
+            dateFrom = dateTo
+            dateTo = tmp
+        End If
+        hasDateFilter = True
+
+    Else
+        ParseDateFilterInput = False
+        Exit Function
+    End If
+End Function
+
+' Returns True if cellValue's date falls within [dateFrom, dateTo] (inclusive,
+' time-of-day ignored). If hasDateFilter is False, always returns True.
+Private Function DateInRange(ByVal cellValue As Variant, _
+                              ByVal hasDateFilter As Boolean, _
+                              ByVal dateFrom As Date, _
+                              ByVal dateTo As Date) As Boolean
+    If Not hasDateFilter Then
+        DateInRange = True
+        Exit Function
+    End If
+    If Not IsDate(cellValue) Then
+        DateInRange = False
+        Exit Function
+    End If
+    Dim d As Date
+    d = Int(CDate(cellValue))
+    DateInRange = (d >= dateFrom And d <= dateTo)
+End Function
+
+' For rows that ARE a stay range themselves (e.g. ETB2 -> ETU2, a vessel's
+' whole time in port), returns True if that stay range overlaps AT ALL with
+' the user's filter range [dateFrom, dateTo] - not just an exact date match.
+' dateFrom/dateTo are day-only (no time); the filter is treated as covering
+' the full 24 hours of every day in that range, i.e. 00:00:00 on dateFrom
+' through 23:59:59 on dateTo.
+Private Function DateRangesOverlap(ByVal rowFrom As Date, ByVal rowTo As Date, _
+                                    ByVal hasDateFilter As Boolean, _
+                                    ByVal dateFrom As Date, ByVal dateTo As Date) As Boolean
+    If Not hasDateFilter Then
+        DateRangesOverlap = True
+        Exit Function
+    End If
+    If rowTo < rowFrom Then   ' guard against bad/swapped data
+        Dim tmp As Date
+        tmp = rowFrom
+        rowFrom = rowTo
+        rowTo = tmp
+    End If
+    Dim filterEnd As Date
+    filterEnd = dateTo + 1 - (1 / 86400)   ' 23:59:59 on dateTo
+    DateRangesOverlap = (rowFrom <= filterEnd) And (rowTo >= dateFrom)
+End Function
+
+' Human-readable text for the date filter, used in summaries/email notes.
+Private Function DateFilterDisplayText(ByVal hasDateFilter As Boolean, _
+                                        ByVal dateFrom As Date, _
+                                        ByVal dateTo As Date) As String
+    If Not hasDateFilter Then
+        DateFilterDisplayText = ""
+    ElseIf dateFrom = dateTo Then
+        DateFilterDisplayText = Format(dateFrom, "dd/mm/yyyy")
+    Else
+        DateFilterDisplayText = Format(dateFrom, "dd/mm/yyyy") & " to " & Format(dateTo, "dd/mm/yyyy")
+    End If
+End Function
+
+'========================================================
+' OPEN / FIND WORKBOOK HELPERS
+'========================================================
+Private Function GetWbByNamePart(ByVal namePart As String) As Workbook
+    Dim wb As Workbook
+    For Each wb In Application.Workbooks
+        If InStr(1, wb.Name, namePart, vbTextCompare) > 0 Then
+            Set GetWbByNamePart = wb
+            Exit Function
+        End If
+    Next wb
+End Function
+
+Private Function OpenLatestFile(ByVal folderPath As String, ByVal pattern As String) As Workbook
+    Dim f As String, bestFile As String
+    Dim bestDate As Date, dt As Date
+    If Right(folderPath, 1) <> "\" Then folderPath = folderPath & "\"
+    f = dir(folderPath & pattern)
+    Do While f <> ""
+        If Not Left$(f, 2) = "~$" Then
+            dt = FileDateTime(folderPath & f)
+            If dt > bestDate Then
+                bestDate = dt
+                bestFile = folderPath & f
+            End If
+        End If
+        f = dir
+    Loop
+    If bestFile <> "" Then
+        Set OpenLatestFile = Workbooks.Open(bestFile)
+    End If
+End Function
+
+'========================================================
+' IDENTIFY VESSEL SHEET
+'========================================================
+Private Function SheetLooksLikeVessel(ByVal ws As Worksheet) As Boolean
+    Dim hdr As Long
+    hdr = FindHeaderRow(ws, "TRMNL", 150)
+    If hdr = 0 Then hdr = FindHeaderRow(ws, "VSL", 150)
+    If hdr = 0 Then Exit Function
+    SheetLooksLikeVessel = _
+        (FindColAny(ws, hdr, Array("VSL / OUTVOY", "VSL / OUT LINE", "VSL")) > 0) And _
+        (FindColByHeader(ws, hdr, "TRMNL") > 0) And _
+        (FindColByHeader(ws, hdr, "BTH") > 0) And _
+        (FindColAny(ws, hdr, Array("ETB", "ETB2")) > 0)
+End Function
+
+Private Function FindVesselWorkbook_OpenFirst() As Workbook
+    Dim wb As Workbook, ws As Worksheet
+    For Each wb In Application.Workbooks
+        For Each ws In wb.Worksheets
+            If SheetLooksLikeVessel(ws) Then
+                Set FindVesselWorkbook_OpenFirst = wb
+                Exit Function
+            End If
+        Next ws
+    Next wb
+End Function
+
+Private Function OpenVesselWorkbook_FromFolder(ByVal folderPath As String) As Workbook
+    Dim patterns As Variant, p As Variant
+    Dim wb As Workbook
+    patterns = Array( _
+        "vessel-list_*.xlsx", "vessel-list_*.xlsm", _
+        "vesselListReport_*.xlsx", "vesselListReport_*.xlsm", _
+        "vessel*list.xlsx", "vessel*list.xlsm" _
+    )
+    For Each p In patterns
+        Set wb = OpenLatestFile(folderPath, CStr(p))
+        If Not wb Is Nothing Then
+            Set OpenVesselWorkbook_FromFolder = wb
+            Exit Function
+        End If
+    Next p
+End Function
+
+Private Function GetVesselWorkbookSmart(ByVal folderPath As String) As Workbook
+    Dim wb As Workbook, ws As Worksheet
+    Set wb = FindVesselWorkbook_OpenFirst()
+    If Not wb Is Nothing Then
+        Set GetVesselWorkbookSmart = wb
+        Exit Function
+    End If
+    Set wb = OpenVesselWorkbook_FromFolder(folderPath)
+    If Not wb Is Nothing Then
+        For Each ws In wb.Worksheets
+            If SheetLooksLikeVessel(ws) Then
+                Set GetVesselWorkbookSmart = wb
+                Exit Function
+            End If
+        Next ws
+    End If
+    Set GetVesselWorkbookSmart = Nothing
+End Function
+
+'========================================================
+' LOAD_VESSEL_LIST WORKBOOK HELPER
+'========================================================
+Private Function GetLoadVesselListWb(ByVal folderPath As String) As Workbook
+    Dim wb As Workbook
+    For Each wb In Application.Workbooks
+        If InStr(1, wb.Name, "Load_Vessel_List", vbTextCompare) > 0 Then
+            Set GetLoadVesselListWb = wb
+            Exit Function
+        End If
+    Next wb
+    Dim patterns As Variant, p As Variant
+    patterns = Array("Load_Vessel_List*.xlsx", "Load_Vessel_List*.xlsm", _
+                     "Load_Vessel_List*.xls")
+    For Each p In patterns
+        Set wb = OpenLatestFile(folderPath, CStr(p))
+        If Not wb Is Nothing Then
+            Set GetLoadVesselListWb = wb
+            Exit Function
+        End If
+    Next p
+    Set GetLoadVesselListWb = Nothing
+End Function
+
+'========================================================
+' SERVICING FILE HELPER
+'========================================================
+Private Function GetServicingWb(ByVal folderPath As String) As Workbook
+    Dim wb As Workbook
+    For Each wb In Application.Workbooks
+        If LCase$(Left$(wb.Name, 9)) = "servicing" Then
+            Set GetServicingWb = wb
+            Exit Function
+        End If
+    Next wb
+    Dim patterns As Variant, p As Variant
+    patterns = Array("Servicing*.xlsx", "Servicing*.xlsm", "Servicing*.xls")
+    For Each p In patterns
+        Set wb = OpenLatestFile(folderPath, CStr(p))
+        If Not wb Is Nothing Then
+            Set GetServicingWb = wb
+            Exit Function
+        End If
+    Next p
+    Set GetServicingWb = Nothing
+End Function
+
+Private Function GetServicingSheet(ByVal wbS As Workbook) As Worksheet
+    Dim shS As Worksheet
+    For Each shS In wbS.Worksheets
+        If FindHeaderRow(shS, "Vsl_Voy2", 10) > 0 Then
+            Set GetServicingSheet = shS
+            Exit Function
+        End If
+    Next shS
+    For Each shS In wbS.Worksheets
+        If LCase$(Left$(shS.Name, 9)) = "servicing" Then
+            Set GetServicingSheet = shS
+            Exit Function
+        End If
+    Next shS
+    Set GetServicingSheet = wbS.ActiveSheet
+End Function
+
+'========================================================
+' DISTANCE FILE HELPER
+'========================================================
+Private Function GetDistanceWb(ByVal folderPath As String) As Workbook
+    Dim wb As Workbook
+    For Each wb In Application.Workbooks
+        If InStr(1, wb.Name, "Distance", vbTextCompare) > 0 Then
+            Set GetDistanceWb = wb
+            Exit Function
+        End If
+    Next wb
+    Dim patterns As Variant, p As Variant
+    patterns = Array("Distance*.xlsx", "Distance*.xlsm", "Distance*.xls")
+    For Each p In patterns
+        Set wb = OpenLatestFile(folderPath, CStr(p))
+        If Not wb Is Nothing Then
+            Set GetDistanceWb = wb
+            Exit Function
+        End If
+    Next p
+    Set GetDistanceWb = Nothing
+End Function
+
+Private Sub PromptDistanceBerth(ByVal wbDist As Workbook)
+    If wbDist Is Nothing Then Exit Sub
+
+    Dim wsDist As Worksheet
+    Set wsDist = wbDist.Worksheets(1)
+
+    Dim noteCell As Range
+    Set noteCell = wsDist.Rows(1).Find(What:="Key in the berth number", _
+        LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+    If noteCell Is Nothing Then
+        Set noteCell = wsDist.Cells(1, 7) ' fallback: G1
+    End If
+
+    Dim valueCell As Range
+    Set valueCell = wsDist.Cells(noteCell.Row, noteCell.Column - 1) ' column F
+
+    Dim berthInput As String
+    berthInput = InputBox( _
+        "Enter the berth number to look up Load / Disc distance in Distance.xlsx" & vbCrLf & vbCrLf & _
+        "(e.g. 38)", _
+        "Distance Lookup - Berth Number", CStr(valueCell.Value))
+
+    If StrPtr(berthInput) = 0 Then Exit Sub
+    berthInput = Trim$(berthInput)
+    If Len(berthInput) = 0 Then Exit Sub
+
+    If Not IsNumeric(berthInput) Then
+        MsgBox "Berth number must be numeric. Distance lookup value not changed.", vbExclamation
+        Exit Sub
+    End If
+
+    valueCell.Value = CLng(berthInput)
+    wbDist.Application.Calculate
+End Sub
+
+Private Function GetARMGBlockList_FromDistance(ByVal wbDist As Workbook) As String
+    Const RED_THRESHOLD As Double = 2501
+    If wbDist Is Nothing Then
+        GetARMGBlockList_FromDistance = ""
+        Exit Function
+    End If
+    Dim wsD As Worksheet
+    On Error Resume Next
+    Set wsD = wbDist.Worksheets("Sheet1")
+    On Error GoTo 0
+    If wsD Is Nothing Then Set wsD = wbDist.Worksheets(1)
+    Dim hdrRow As Long
+    hdrRow = FindHeaderRowExact(wsD, "Equipment", 15)
+    If hdrRow = 0 Then hdrRow = FindHeaderRow(wsD, "Equipment", 15)
+    If hdrRow = 0 Then
+        MsgBox "Cannot find 'Equipment' header in Distance.xlsx Sheet1.", vbExclamation
+        GetARMGBlockList_FromDistance = ""
+        Exit Function
+    End If
+    Dim colEquip As Long
+    colEquip = FindColByHeader(wsD, hdrRow, "Equipment")
+    If colEquip = 0 Then
+        GetARMGBlockList_FromDistance = ""
+        Exit Function
+    End If
+    Dim equipVal As String
+    equipVal = CleanText(wsD.Cells(hdrRow + 1, colEquip).Value)
+    If InStr(1, equipVal, "Armg", vbTextCompare) = 0 Then
+        MsgBox "Expected 'Armg' in Distance.xlsx at row " & (hdrRow + 1) & _
+               ", column " & colEquip & " but found: '" & equipVal & "'." & vbCrLf & _
+               "Layout may have changed - please check Distance.xlsx.", vbExclamation
+        GetARMGBlockList_FromDistance = ""
+        Exit Function
+    End If
+    Dim blockCols(0 To 2) As Long
+    Dim distCols(0 To 2) As Long
+    blockCols(0) = colEquip + 1: distCols(0) = colEquip + 2   ' P4
+    blockCols(1) = colEquip + 3: distCols(1) = colEquip + 4   ' P5
+    blockCols(2) = colEquip + 5: distCols(2) = colEquip + 6   ' P6
+    Dim bc As Long
+    For bc = 0 To 2
+        If LCase$(CleanText(wsD.Cells(hdrRow, blockCols(bc)).Value)) <> "block" Then
+            MsgBox "Expected 'Block' header at column " & blockCols(bc) & _
+                   " on row " & hdrRow & " - layout may have changed.", vbExclamation
+            GetARMGBlockList_FromDistance = ""
+            Exit Function
+        End If
+        If LCase$(CleanText(wsD.Cells(hdrRow, distCols(bc)).Value)) <> "distance" Then
+            MsgBox "Expected 'Distance' header at column " & distCols(bc) & _
+                   " on row " & hdrRow & " - layout may have changed.", vbExclamation
+            GetARMGBlockList_FromDistance = ""
+            Exit Function
+        End If
+    Next bc
+    Dim r As Long
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+    dict.CompareMode = 1
+    r = hdrRow + 1
+    Do While Len(CleanText(wsD.Cells(r, blockCols(0)).Value)) > 0 _
+           Or Len(CleanText(wsD.Cells(r, blockCols(1)).Value)) > 0 _
+           Or Len(CleanText(wsD.Cells(r, blockCols(2)).Value)) > 0
+        For bc = 0 To 2
+            Dim bv As String
+            Dim dv As Variant
+            bv = CleanText(wsD.Cells(r, blockCols(bc)).Value)
+            dv = wsD.Cells(r, distCols(bc)).Value
+            If Len(bv) > 0 And IsNumeric(dv) Then
+                If CDbl(dv) > RED_THRESHOLD Then
+                    If Not dict.Exists(UCase$(bv)) Then dict.Add UCase$(bv), bv
+                End If
+            End If
+        Next bc
+        r = r + 1
+    Loop
+    Dim result As String, key As Variant
+    For Each key In dict.Keys
+        If Len(result) > 0 Then result = result & "|"
+        result = result & dict(key)
+    Next key
+    GetARMGBlockList_FromDistance = result
+End Function
+
+Private Function GetSelfServiceWb(ByVal folderPath As String) As Workbook
+    Dim wb As Workbook
+    For Each wb In Application.Workbooks
+        If InStr(1, wb.Name, "Self_Service", vbTextCompare) > 0 Then
+            Set GetSelfServiceWb = wb
+            Exit Function
+        End If
+    Next wb
+    Dim patterns As Variant, p As Variant
+    patterns = Array("Self_Service*.xlsm", "Self_Service*.xlsx", "Self_Service*.xls")
+    For Each p In patterns
+        Set wb = OpenLatestFile(folderPath, CStr(p))
+        If Not wb Is Nothing Then
+            Set GetSelfServiceWb = wb
+            Exit Function
+        End If
+    Next p
+    Set GetSelfServiceWb = Nothing
+End Function
+
+'========================================================
+' SELF_SERVICE WORKING-COPY HELPERS
+'========================================================
+' All Long Haul / aRMG filtering works off a disposable COPY of the
+' Self_Service tab, so the original "Self_Service" tab and its pivot are
+' never modified by the macro. The copy is deleted and rebuilt fresh at the
+' start of every run, so nothing accumulates across repeated runs.
+' (The working-copy sheet name "Long Haul" is written directly
+' wherever it's needed below, rather than via a shared constant, so this
+' code has no dependency on any other declaration in the module.)
+
+' Locates the ORIGINAL Self_Service sheet (never the working copy).
+Private Function GetSelfServiceSourceSheet(ByVal wbSS As Workbook) As Worksheet
+    Dim wsSS As Worksheet, sh As Worksheet, testPF As PivotField
+
+    On Error Resume Next
+    Set wsSS = wbSS.Worksheets("Self_Service")
+    On Error GoTo 0
+
+    If wsSS Is Nothing Then
+        For Each sh In wbSS.Worksheets
+            If StrComp(sh.Name, "Long Haul", vbTextCompare) <> 0 And _
+               StrComp(sh.Name, "Self Service", vbTextCompare) <> 0 Then
+                If sh.PivotTables.Count > 0 Then
+                    On Error Resume Next
+                    Set testPF = Nothing
+                    Set testPF = sh.PivotTables(1).PivotFields("Block")
+                    On Error GoTo 0
+                    If Not testPF Is Nothing Then
+                        Set wsSS = sh
+                        Exit For
+                    End If
+                End If
+            End If
+        Next sh
+    End If
+
+    Set GetSelfServiceSourceSheet = wsSS
+End Function
+
+' Returns the disposable "Long Haul" working copy.
+'   forceRecreate:=True  -> always delete any old copy and rebuild fresh from
+'                            the source sheet (use this ONCE, at the start of
+'                            a run, e.g. in Setup_SelfService_Pivot).
+'   forceRecreate:=False -> reuse the copy already created earlier in this
+'                            same run (use this in every later step, e.g.
+'                            Apply_ARMG_Block_Filter_To_SelfService and
+'                            BuildSelfServiceRedBlockHtml), so their edits
+'                            land on the same sheet instead of each starting
+'                            over from a blank copy.
+Private Function GetSelfServiceWorkingSheet(ByVal wbSS As Workbook, _
+                                             Optional ByVal forceRecreate As Boolean = True) As Worksheet
+    Dim wsExisting As Worksheet
+    On Error Resume Next
+    Set wsExisting = wbSS.Worksheets("Long Haul")
+    On Error GoTo 0
+
+    If Not forceRecreate And Not wsExisting Is Nothing Then
+        Set GetSelfServiceWorkingSheet = wsExisting
+        Exit Function
+    End If
+
+    Dim wsSource As Worksheet
+    Set wsSource = GetSelfServiceSourceSheet(wbSS)
+    If wsSource Is Nothing Then
+        Set GetSelfServiceWorkingSheet = Nothing
+        Exit Function
+    End If
+
+    Application.DisplayAlerts = False
+    If Not wsExisting Is Nothing Then wsExisting.Delete
+    Application.DisplayAlerts = True
+
+    wsSource.Copy After:=wbSS.Worksheets(wbSS.Worksheets.Count)
+
+    Dim wsNew As Worksheet
+    Set wsNew = wbSS.Worksheets(wbSS.Worksheets.Count)
+    On Error Resume Next
+    wsNew.Name = "Long Haul"
+    On Error GoTo 0
+
+    Set GetSelfServiceWorkingSheet = wsNew
+End Function
+
+Private Sub FilterSelfService_BlockToARMG(ByVal folderPath As String, ByVal blockListStr As String)
+    If Len(blockListStr) = 0 Then
+        MsgBox "No red-flagged aRMG Block values found - nothing to filter in Self_Service.xlsx.", vbExclamation
+        Exit Sub
+    End If
+
+    Dim wbSS As Workbook
+    Set wbSS = GetSelfServiceWb(folderPath)
+    If wbSS Is Nothing Then
+        MsgBox "Cannot find/open Self_Service.xlsx/.xlsm in: " & folderPath, vbExclamation
+        Exit Sub
+    End If
+
+    Dim wsSS As Worksheet, ptSS As PivotTable
+    Set wsSS = GetSelfServiceWorkingSheet(wbSS, forceRecreate:=False)
+
+    If wsSS Is Nothing Or wsSS.PivotTables.Count = 0 Then
+        MsgBox "Cannot find the pivot table with a 'Block' field in Self_Service.xlsx.", vbExclamation
+        Exit Sub
+    End If
+    Set ptSS = wsSS.PivotTables(1)
+
+    Dim pf As PivotField
+    On Error Resume Next
+    Set pf = ptSS.PivotFields("Block")
+    On Error GoTo 0
+    If pf Is Nothing Then
+        MsgBox "'Block' field not found on the pivot table in Self_Service.xlsx.", vbExclamation
+        Exit Sub
+    End If
+
+    Dim allowedBlocks() As String
+    allowedBlocks = Split(blockListStr, "|")
+
+    Dim pi As PivotItem
+    ptSS.ManualUpdate = True
+
+    ' --- Lock CT and Terminal_ID to the required values ---
+     FilterSelfService_PageField ptSS, "CT", Array("PPT4-6")
+     FilterSelfService_PageField ptSS, "Terminal_ID", Array("PPT4", "P56SE")
+    ' --------------------------------------------------------------
+
+    pf.EnableMultiplePageItems = True
+
+    For Each pi In pf.PivotItems
+        On Error Resume Next
+        pi.Visible = True
+        On Error GoTo 0
+    Next pi
+
+    Dim isAllowed As Boolean, a As Long
+    For Each pi In pf.PivotItems
+        isAllowed = False
+        For a = LBound(allowedBlocks) To UBound(allowedBlocks)
+            If StrComp(pi.Name, allowedBlocks(a), vbTextCompare) = 0 Then
+                isAllowed = True
+                Exit For
+            End If
+        Next a
+        If Not isAllowed Then
+            On Error Resume Next
+            pi.Visible = False
+            On Error GoTo 0
+        End If
+    Next pi
+
+    ptSS.ManualUpdate = False
+
+End Sub
+
+
+ 
+ 
+ 
+ 
+ Private Sub Setup_SelfService_Pivot_Layout(ByVal pt As PivotTable)
+
+    Dim pf As PivotField
+    Dim wantedFields As Variant
+    Dim i As Long, isWanted As Boolean
+
+    wantedFields = Array("Slot", "Terminal_ID", "CT", "ETB2", "ETU2", "Vsl_Voy2", "Block", "Cntr_N")
+
+    pt.ManualUpdate = True
+    On Error Resume Next
+
+    '--- STEP 0 (NEW): wipe out ANY existing data fields first ---
+    ' This is what was causing "Data" as a row header and vessels
+    ' being duplicated (Count of Cntr_N / Cntr_N2)
+    Dim dfCount As Long
+    For dfCount = pt.DataFields.Count To 1 Step -1
+        pt.DataFields(dfCount).Orientation = xlHidden
+    Next dfCount
+
+    '--- Step 1: hide every field NOT in our wanted list ---
+    For Each pf In pt.PivotFields
+        isWanted = False
+        For i = LBound(wantedFields) To UBound(wantedFields)
+            If StrComp(pf.Name, CStr(wantedFields(i)), vbTextCompare) = 0 Then
+                isWanted = True
+                Exit For
+            End If
+        Next i
+        If Not isWanted Then pf.Orientation = xlHidden
+    Next pf
+
+    '--- Step 2: Filters ---
+    pt.PivotFields("Slot").Orientation = xlPageField
+    pt.PivotFields("Slot").Position = 1
+    pt.PivotFields("Terminal_ID").Orientation = xlPageField
+    pt.PivotFields("Terminal_ID").Position = 2
+    pt.PivotFields("CT").Orientation = xlPageField
+    pt.PivotFields("CT").Position = 3
+
+    '--- Step 3: Rows ---
+    pt.PivotFields("ETB2").Orientation = xlRowField
+    pt.PivotFields("ETB2").Position = 1
+    pt.PivotFields("ETU2").Orientation = xlRowField
+    pt.PivotFields("ETU2").Position = 2
+    pt.PivotFields("Vsl_Voy2").Orientation = xlRowField
+    pt.PivotFields("Vsl_Voy2").Position = 3
+
+    '--- Step 4: Columns ---
+    pt.PivotFields("Block").Orientation = xlColumnField
+    pt.PivotFields("Block").Position = 1
+
+    '--- Step 5: Values - exactly ONE field ---
+    Dim pfData As PivotField
+    Set pfData = pt.PivotFields("Cntr_N")
+    pfData.Orientation = xlDataField
+    pfData.Function = xlCount
+    pfData.caption = "Count of Cntr_N"
+
+    ' Keep the invisible "S Values" field pinned to Columns, never Rows
+    ForceValuesToColumns pt
+
+    On Error GoTo 0
+    pt.ManualUpdate = False
+
+End Sub
+
+Public Sub Setup_SelfService_Pivot()
+    Dim wbSS As Workbook
+    Set wbSS = GetSelfServiceWb(ThisWorkbook.Path)
+    If wbSS Is Nothing Then
+        MsgBox "Cannot find/open Self_Service.xlsx/.xlsm.", vbExclamation
+        Exit Sub
+    End If
+ 
+    Dim wsSS As Worksheet, ptSS As PivotTable
+    Set wsSS = GetSelfServiceWorkingSheet(wbSS, forceRecreate:=True)
+ 
+    If wsSS Is Nothing Or wsSS.PivotTables.Count = 0 Then
+        MsgBox "Cannot find a pivot table in Self_Service.xlsx.", vbExclamation
+        Exit Sub
+    End If
+    Set ptSS = wsSS.PivotTables(1)
+ 
+    Setup_SelfService_Pivot_Layout ptSS
+ 
+    MsgBox "Self_Service pivot layout set (on a working copy - 'Long Haul'" & _
+           " tab - the original Self_Service tab is untouched):" & vbCrLf & _
+           "Filters: Slot, Terminal_ID, CT" & vbCrLf & _
+           "Rows: ETB2, ETU2, Vsl_Voy2" & vbCrLf & _
+           "Columns: Block" & vbCrLf & _
+           "Values: Count of Cntr_N", vbInformation, "Self_Service Pivot Layout"
+End Sub
+ 
+ 
+Public Sub Apply_ARMG_Block_Filter_To_SelfService(ByVal wbDist As Workbook)
+    If wbDist Is Nothing Then
+        Set wbDist = GetDistanceWb(ThisWorkbook.Path)
+    End If
+    If wbDist Is Nothing Then
+        MsgBox "Cannot find/open Distance.xlsx in " & ThisWorkbook.Path & ".", vbExclamation
+        Exit Sub
+    End If
+
+    Dim blockListStr As String
+    blockListStr = GetARMGBlockList_FromDistance(wbDist)
+
+    FilterSelfService_BlockToARMG ThisWorkbook.Path, blockListStr
+End Sub
+
+'========================================================
+' "SELF SERVICING" WORKING-COPY (Terminal_ID = PPT4 / P56SE only,
+' NOT restricted to the red aRMG blocks - this is the separate
+' tab requested to sit alongside "Long Haul").
+'========================================================
+' Returns the disposable "Self Service" working copy - built the same
+' way as the "Long Haul" copy (fresh duplicate of the original Self_Service
+' tab each run), just kept on its own sheet/pivot so the two tables never
+' interfere with each other.
+Private Function GetSelfServicingWorkingSheet(ByVal wbSS As Workbook, _
+                                               Optional ByVal forceRecreate As Boolean = True) As Worksheet
+    Dim wsExisting As Worksheet
+    On Error Resume Next
+    Set wsExisting = wbSS.Worksheets("Self Service")
+    On Error GoTo 0
+
+    If Not forceRecreate And Not wsExisting Is Nothing Then
+        Set GetSelfServicingWorkingSheet = wsExisting
+        Exit Function
+    End If
+
+    Dim wsSource As Worksheet
+    Set wsSource = GetSelfServiceSourceSheet(wbSS)
+    If wsSource Is Nothing Then
+        Set GetSelfServicingWorkingSheet = Nothing
+        Exit Function
+    End If
+
+    Application.DisplayAlerts = False
+    If Not wsExisting Is Nothing Then wsExisting.Delete
+    Application.DisplayAlerts = True
+
+    wsSource.Copy After:=wbSS.Worksheets(wbSS.Worksheets.Count)
+
+    Dim wsNew As Worksheet
+    Set wsNew = wbSS.Worksheets(wbSS.Worksheets.Count)
+    On Error Resume Next
+    wsNew.Name = "Self Service"
+    On Error GoTo 0
+
+    Set GetSelfServicingWorkingSheet = wsNew
+End Function
+
+' Pivot layout to match the requested screenshot:
+'   Filters: Slot, Terminal_ID, CT
+'   Rows:    Block, Vsl_Voy2, ETB2, ETU2  (nested, no Columns field)
+'   Values:  Count of Cntr_N
+Private Sub Setup_SelfServicing_Pivot_Layout(ByVal pt As PivotTable)
+
+    Dim pf As PivotField
+    Dim wantedFields As Variant
+    Dim i As Long, isWanted As Boolean
+
+    wantedFields = Array("Slot", "Terminal_ID", "CT", "ETB2", "ETU2", "Vsl_Voy2", "Block", "Cntr_N")
+
+    pt.ManualUpdate = True
+    On Error Resume Next
+
+    '--- STEP 0: wipe out ANY existing data fields first ---
+    Dim dfCount As Long
+    For dfCount = pt.DataFields.Count To 1 Step -1
+        pt.DataFields(dfCount).Orientation = xlHidden
+    Next dfCount
+
+    '--- Step 1: hide every field NOT in our wanted list ---
+    For Each pf In pt.PivotFields
+        isWanted = False
+        For i = LBound(wantedFields) To UBound(wantedFields)
+            If StrComp(pf.Name, CStr(wantedFields(i)), vbTextCompare) = 0 Then
+                isWanted = True
+                Exit For
+            End If
+        Next i
+        If Not isWanted Then pf.Orientation = xlHidden
+    Next pf
+
+    '--- Step 2: Filters ---
+    pt.PivotFields("Slot").Orientation = xlPageField
+    pt.PivotFields("Slot").Position = 1
+    pt.PivotFields("Terminal_ID").Orientation = xlPageField
+    pt.PivotFields("Terminal_ID").Position = 2
+    pt.PivotFields("CT").Orientation = xlPageField
+    pt.PivotFields("CT").Position = 3
+
+    '--- Step 3: Rows - Block, Vsl_Voy2, ETB2, ETU2 (nested, per screenshot) ---
+    pt.PivotFields("Block").Orientation = xlRowField
+    pt.PivotFields("Block").Position = 1
+    pt.PivotFields("Vsl_Voy2").Orientation = xlRowField
+    pt.PivotFields("Vsl_Voy2").Position = 2
+    pt.PivotFields("ETB2").Orientation = xlRowField
+    pt.PivotFields("ETB2").Position = 3
+    pt.PivotFields("ETU2").Orientation = xlRowField
+    pt.PivotFields("ETU2").Position = 4
+
+    '--- Step 4: no Columns field ---
+
+    '--- Step 5: Values - exactly ONE field ---
+    Dim pfData As PivotField
+    Set pfData = pt.PivotFields("Cntr_N")
+    pfData.Orientation = xlDataField
+    pfData.Function = xlCount
+    pfData.caption = "Count of Cntr_N"
+
+    On Error GoTo 0
+    pt.ManualUpdate = False
+
+End Sub
+
+' Builds the "Self Service" working copy, applies the layout above, and
+' locks Terminal_ID to PPT4 / P56SE only (Slot and CT are left at "(All)",
+' matching the screenshot - unlike Long Haul, CT is NOT locked to "PPT4-6").
+' blockFilterStr is an optional pipe-separated list of Block names (e.g.
+' "TA01|TB02") - leave blank to show every block.
+Public Sub Setup_SelfServicing_Pivot(Optional ByVal blockFilterStr As String = "")
+    Dim wbSS As Workbook
+    Set wbSS = GetSelfServiceWb(ThisWorkbook.Path)
+    If wbSS Is Nothing Then
+        MsgBox "Cannot find/open Self_Service.xlsx/.xlsm.", vbExclamation
+        Exit Sub
+    End If
+
+    Dim wsSS As Worksheet, ptSS As PivotTable
+    Set wsSS = GetSelfServicingWorkingSheet(wbSS, forceRecreate:=True)
+
+    If wsSS Is Nothing Or wsSS.PivotTables.Count = 0 Then
+        MsgBox "Cannot find a pivot table in Self_Service.xlsx.", vbExclamation
+        Exit Sub
+    End If
+    Set ptSS = wsSS.PivotTables(1)
+
+    ptSS.ManualUpdate = True
+    Setup_SelfServicing_Pivot_Layout ptSS
+
+    ' --- Lock Terminal_ID to PPT4 / P56SE; Slot and CT stay "(All)" ---
+    FilterSelfService_PageField ptSS, "Terminal_ID", Array("PPT4", "P56SE")
+
+    ' --- Optional Block filter (Rows field) ---
+    If Len(blockFilterStr) > 0 Then
+        Dim blockTokens() As String
+        blockTokens = Split(blockFilterStr, "|")
+        FilterSelfService_PageField ptSS, "Block", blockTokens
+    End If
+
+    ptSS.ManualUpdate = False
+
+End Sub
+
+'------------------------------------------------------------
+' Reads the live "Self Service" pivot (Terminal_ID = PPT4/P56SE,
+' Rows: Block > Vsl_Voy2 > ETB2 > ETU2, Values: Count of Cntr_N)
+' and builds a simple HTML table for the email:
+'   Block | Vsl_Voy2 | ETB2 | ETU2 | Count
+'------------------------------------------------------------
+Private Function BuildSelfServicingHtml(ByVal folderPath As String, _
+                                         Optional ByVal filterStr As String = "", _
+                                         Optional ByVal hasDateFilter As Boolean = False, _
+                                         Optional ByVal dateFrom As Date = 0, _
+                                         Optional ByVal dateTo As Date = 0, _
+                                         Optional ByVal blockFilterStr As String = "") As String
+
+    Dim wbSS As Workbook
+    Dim wsSS As Worksheet
+    Dim ptSS As PivotTable
+
+    Set wbSS = GetSelfServiceWb(folderPath)
+    If wbSS Is Nothing Then
+        BuildSelfServicingHtml = ""
+        Exit Function
+    End If
+
+    Set wsSS = GetSelfServicingWorkingSheet(wbSS, forceRecreate:=False)
+    If wsSS Is Nothing Or wsSS.PivotTables.Count = 0 Then
+        BuildSelfServicingHtml = ""
+        Exit Function
+    End If
+    Set ptSS = wsSS.PivotTables(1)
+
+    Dim rowRng As Range, dataRng As Range
+    On Error Resume Next
+    Set rowRng = ptSS.RowRange
+    Set dataRng = ptSS.DataBodyRange
+    On Error GoTo 0
+
+    If rowRng Is Nothing Or dataRng Is Nothing Then
+        BuildSelfServicingHtml = ""
+        Exit Function
+    End If
+
+    Dim valCaption As String
+    On Error Resume Next
+    valCaption = ptSS.DataFields(1).caption
+    On Error GoTo 0
+    If Len(valCaption) = 0 Then valCaption = "Count"
+
+    Dim nRowLevels As Long
+    nRowLevels = rowRng.Columns.Count   ' Block, Vsl_Voy2, ETB2, ETU2 = 4
+
+    Dim blockCol As Long, vslCol As Long, etbCol As Long, etuCol As Long
+    On Error Resume Next
+    blockCol = ptSS.PivotFields("Block").DataRange.Column - rowRng.Column + 1
+    vslCol = ptSS.PivotFields("Vsl_Voy2").DataRange.Column - rowRng.Column + 1
+    etbCol = ptSS.PivotFields("ETB2").DataRange.Column - rowRng.Column + 1
+    etuCol = ptSS.PivotFields("ETU2").DataRange.Column - rowRng.Column + 1
+    On Error GoTo 0
+
+    If blockCol < 1 Or vslCol < 1 Or etbCol < 1 Or etuCol < 1 Then
+        BuildSelfServicingHtml = ""
+        Exit Function
+    End If
+
+    Dim fillVals() As String
+    ReDim fillVals(1 To nRowLevels)
+
+    Dim nRows As Long
+    nRows = dataRng.Rows.Count
+
+    Dim bodyRows As String
+    Dim anyRow As Boolean
+    anyRow = False
+
+    Dim r As Long, lvl As Long
+    Dim grandTotal As Double
+    grandTotal = 0
+    Dim etbFillDate As Variant, etuFillDate As Variant
+
+    For r = 1 To nRows
+
+        Dim leafVal As String
+        leafVal = CleanText(rowRng.Cells(r, nRowLevels).Value)
+
+        For lvl = 1 To nRowLevels
+            Dim cellTxt As String
+            Dim rawVal As Variant
+            rawVal = rowRng.Cells(r, lvl).Value
+            cellTxt = CleanText(rawVal)
+            If Len(cellTxt) > 0 Then
+                fillVals(lvl) = cellTxt
+                If lvl = etbCol Then etbFillDate = rawVal
+                If lvl = etuCol Then etuFillDate = rawVal
+            End If
+        Next lvl
+
+        If Len(leafVal) = 0 Then GoTo NextSSRow
+        If InStr(1, leafVal, "total", vbTextCompare) > 0 Then GoTo NextSSRow
+        If InStr(1, fillVals(nRowLevels), "total", vbTextCompare) > 0 Then GoTo NextSSRow
+        If InStr(1, leafVal, "Count of", vbTextCompare) > 0 Then GoTo NextSSRow
+
+        '=== VESSEL NAME FILTER (matches Vsl_Voy2) ===
+        If Not MatchesAnyVessel(fillVals(vslCol), filterStr) Then GoTo NextSSRow
+        '==============================================
+
+        '=== BLOCK FILTER (matches Block) ===
+        If Not MatchesAnyVessel(fillVals(blockCol), blockFilterStr) Then GoTo NextSSRow
+        '=====================================
+
+        '=== DATE FILTER (row's stay = ETB2 -> ETU2 must overlap the requested range) ===
+        If hasDateFilter Then
+            If Not (IsDate(etbFillDate) And IsDate(etuFillDate)) Then GoTo NextSSRow
+            If Not DateRangesOverlap(CDate(etbFillDate), CDate(etuFillDate), _
+                                      hasDateFilter, dateFrom, dateTo) Then GoTo NextSSRow
+        End If
+        '================================================================================
+
+        Dim cVal As Variant
+        cVal = dataRng.Cells(r, 1).Value
+        If Not IsNumeric(cVal) Then GoTo NextSSRow
+        If CDbl(cVal) <= 0 Then GoTo NextSSRow
+
+        grandTotal = grandTotal + CDbl(cVal)
+        anyRow = True
+
+        bodyRows = bodyRows & "<tr style='background-color:#E2EFDA;'>" & _
+            "<td style='text-align:left;padding:8px;white-space:nowrap;'>" & HtmlEncode(fillVals(blockCol)) & "</td>" & _
+            "<td style='text-align:left;padding:8px;white-space:nowrap;'>" & HtmlEncode(fillVals(vslCol)) & "</td>" & _
+            "<td style='text-align:left;padding:8px;white-space:nowrap;'>" & HtmlEncode(fillVals(etbCol)) & "</td>" & _
+            "<td style='text-align:left;padding:8px;white-space:nowrap;'>" & HtmlEncode(fillVals(etuCol)) & "</td>" & _
+            "<td style='text-align:center;padding:8px;color:#375623;font-weight:bold;'>" & HtmlEncode(CStr(CLng(cVal))) & "</td>" & _
+            "</tr>"
+
+NextSSRow:
+    Next r
+
+    If Not anyRow Then
+        BuildSelfServicingHtml = ""
+        Exit Function
+    End If
+
+    Dim html As String
+    html = "<br><br><p><b>Self Service (PPT4 / P56SE):</b>"
+    Dim noteBits As String
+    If Len(filterStr) > 0 Then noteBits = noteBits & "vessel(s): " & Replace(filterStr, "|", ", ")
+    If Len(blockFilterStr) > 0 Then
+        If Len(noteBits) > 0 Then noteBits = noteBits & "; "
+        noteBits = noteBits & "block(s): " & Replace(blockFilterStr, "|", ", ")
+    End If
+    If hasDateFilter Then
+        If Len(noteBits) > 0 Then noteBits = noteBits & "; "
+        noteBits = noteBits & "date: " & DateFilterDisplayText(hasDateFilter, dateFrom, dateTo)
+    End If
+    If Len(noteBits) > 0 Then
+        html = html & "  <span style='font-weight:normal;'>(filtered to " & HtmlEncode(noteBits) & ")</span>"
+    End If
+    html = html & "</p>"
+
+    html = html & "<table border='1' cellpadding='8' cellspacing='0' " & _
+        "style='border-collapse:collapse;font-family:Calibri;font-size:10.5pt;'>"
+
+    html = html & "<tr><td colspan='5' " & _
+        "style='background-color:#548235;color:#FFFFFF;font-weight:bold;text-align:center;font-size:12pt;padding:10px;'>" & _
+        "Self Service</td></tr>"
+
+    html = html & "<tr style='background-color:#C6E0B4;font-weight:bold;'>" & _
+        "<th style='text-align:left;padding:8px;white-space:nowrap;'>Block</th>" & _
+        "<th style='text-align:left;padding:8px;white-space:nowrap;'>Vsl_Voy2</th>" & _
+        "<th style='text-align:left;padding:8px;white-space:nowrap;'>Start Date</th>" & _
+        "<th style='text-align:left;padding:8px;white-space:nowrap;'>End Date</th>" & _
+        "<th style='text-align:center;padding:8px;'>Grand Total</th>" & _
+        "</tr>"
+
+    html = html & bodyRows
+
+    html = html & "<tr style='background-color:#C6E0B4;font-weight:bold;'>" & _
+        "<td colspan='4' style='text-align:right;padding:8px;'>Grand Total</td>" & _
+        "<td style='text-align:center;padding:8px;'>" & HtmlEncode(CStr(CLng(grandTotal))) & "</td></tr>"
+
+    html = html & "</table>"
+
+    BuildSelfServicingHtml = html
+
+End Function
+
+'------------------------------------------------------------
+' Reads the live Self_Service pivot (already filtered to the
+' red-flagged aRMG Block columns) and builds an HTML table
+' matching the pivot's own layout:
+'   Row 1: value-field caption (e.g. "Count of Cntr_N") | "Block" spanning the block columns
+'   Row 2: ETB2 | ETU2 | Vsl_Voy2 | TU01 TU02 ... | Grand Total
+'   Data rows: counts in red, Grand Total in black/bold
+'------------------------------------------------------------
+Private Function BuildSelfServiceRedBlockHtml(ByVal folderPath As String, _
+                                               Optional ByVal filterStr As String = "", _
+                                               Optional ByVal hasDateFilter As Boolean = False, _
+                                               Optional ByVal dateFrom As Date = 0, _
+                                               Optional ByVal dateTo As Date = 0) As String
+
+    Dim wbSS As Workbook
+    Dim wsSS As Worksheet
+    Dim ptSS As PivotTable
+    Dim sh As Worksheet
+    Dim testPF As PivotField
+
+    Set wbSS = GetSelfServiceWb(folderPath)
+
+    If wbSS Is Nothing Then
+        BuildSelfServiceRedBlockHtml = ""
+        Exit Function
+    End If
+
+    Set wsSS = GetSelfServiceWorkingSheet(wbSS, forceRecreate:=False)
+
+    If wsSS Is Nothing Or wsSS.PivotTables.Count = 0 Then
+        BuildSelfServiceRedBlockHtml = ""
+        Exit Function
+    End If
+
+    Set ptSS = wsSS.PivotTables(1)
+
+    Dim rowRng As Range
+    Dim colRng As Range
+    Dim dataRng As Range
+
+    On Error Resume Next
+    Set rowRng = ptSS.RowRange
+    Set colRng = ptSS.ColumnRange
+    Set dataRng = ptSS.DataBodyRange
+    On Error GoTo 0
+
+    If rowRng Is Nothing Or colRng Is Nothing Or dataRng Is Nothing Then
+        BuildSelfServiceRedBlockHtml = ""
+        Exit Function
+    End If
+
+    '--- Value field caption ---
+    Dim valCaption As String
+
+    On Error Resume Next
+    valCaption = ptSS.DataFields(1).caption
+    On Error GoTo 0
+
+    If Len(valCaption) = 0 Then valCaption = "Count"
+
+    '--- Column field caption ---
+    Dim colFieldCaption As String
+
+    On Error Resume Next
+    colFieldCaption = ptSS.ColumnFields(1).caption
+    On Error GoTo 0
+
+    If Len(colFieldCaption) = 0 Then colFieldCaption = "Block"
+
+    '--- Column headers ---
+    Dim nColsRaw As Long
+    nColsRaw = dataRng.Columns.Count
+
+    Dim nCols As Long
+    nCols = nColsRaw
+
+    Dim cIdx As Long
+    Dim colHdrRow As Range
+
+    Set colHdrRow = colRng.Rows(colRng.Rows.Count)
+
+    Dim lastHdrText As String
+    lastHdrText = CleanText(colHdrRow.Cells(1, nColsRaw).Value)
+
+    Dim pivotHasNativeGrandTotal As Boolean
+    pivotHasNativeGrandTotal = _
+        (InStr(1, lastHdrText, "grand total", vbTextCompare) > 0)
+
+    If pivotHasNativeGrandTotal Then nCols = nColsRaw - 1
+
+    Dim blockHeaders() As String
+    ReDim blockHeaders(1 To nCols)
+
+    For cIdx = 1 To nCols
+        blockHeaders(cIdx) = CleanText(colHdrRow.Cells(1, cIdx).Value)
+    Next cIdx
+
+    '--- Row labels ---
+    Dim nRowLevels As Long
+    nRowLevels = rowRng.Columns.Count
+
+    Dim nRows As Long
+    nRows = dataRng.Rows.Count
+
+    Dim fillVals() As String
+    ReDim fillVals(1 To nRowLevels)
+
+    '========================================================
+    ' Find actual physical columns
+    '========================================================
+
+    Dim etbCol As Long
+    Dim etuCol As Long
+    Dim vslCol As Long
+
+    On Error Resume Next
+    etbCol = ptSS.PivotFields("ETB2").DataRange.Column - rowRng.Column + 1
+    etuCol = ptSS.PivotFields("ETU2").DataRange.Column - rowRng.Column + 1
+    vslCol = ptSS.PivotFields("Vsl_Voy2").DataRange.Column - rowRng.Column + 1
+    On Error GoTo 0
+
+    If etbCol < 1 Or etuCol < 1 Or vslCol < 1 Then
+        BuildSelfServiceRedBlockHtml = ""
+        Exit Function
+    End If
+
+    Dim fieldNameTokens As Variant
+
+    fieldNameTokens = Array( _
+        "ETB2", _
+        "ETU2", _
+        "VSL_VOY2", _
+        "BLOCK", _
+        "DATA", _
+        "SLOT", _
+        "TERMINAL_ID", _
+        "CT")
+
+    Dim dictAgg As Object
+    Set dictAgg = CreateObject("Scripting.Dictionary")
+    dictAgg.CompareMode = 1
+
+    Dim keyOrder As Collection
+    Set keyOrder = New Collection
+
+    Dim r As Long
+    Dim lvl As Long
+    Dim etbFillDate As Variant, etuFillDate As Variant
+
+    For r = 1 To nRows
+
+        Dim leafVal As String
+        leafVal = CleanText(rowRng.Cells(r, nRowLevels).Value)
+
+        For lvl = 1 To nRowLevels
+
+            Dim cellTxt As String
+            Dim rawVal As Variant
+            rawVal = rowRng.Cells(r, lvl).Value
+            cellTxt = CleanText(rawVal)
+
+            If Len(cellTxt) > 0 Then
+                fillVals(lvl) = cellTxt
+                If lvl = etbCol Then etbFillDate = rawVal
+                If lvl = etuCol Then etuFillDate = rawVal
+            End If
+
+        Next lvl
+
+        If Len(leafVal) = 0 Then GoTo NextRLoop
+        If InStr(1, fillVals(nRowLevels), "total", vbTextCompare) > 0 Then GoTo NextRLoop
+        If InStr(1, leafVal, "total", vbTextCompare) > 0 Then GoTo NextRLoop
+        If InStr(1, leafVal, "Count of", vbTextCompare) > 0 Then GoTo NextRLoop
+
+        Dim isFieldNameRow As Boolean
+        isFieldNameRow = False
+
+        Dim ft As Long
+
+        For lvl = 1 To nRowLevels
+
+            For ft = LBound(fieldNameTokens) To UBound(fieldNameTokens)
+
+                If StrComp(Trim$(fillVals(lvl)), _
+                           CStr(fieldNameTokens(ft)), _
+                           vbTextCompare) = 0 Then
+
+                    isFieldNameRow = True
+                    Exit For
+
+                End If
+
+            Next ft
+
+            If isFieldNameRow Then Exit For
+
+        Next lvl
+
+        If isFieldNameRow Then GoTo NextRLoop
+
+        '=== VESSEL NAME FILTER (matches Vsl_Voy2, e.g. "CMA DEBUSSY(HMG1S1-V)") ===
+        If Not MatchesAnyVessel(fillVals(vslCol), filterStr) Then GoTo NextRLoop
+        '=============================================================================
+
+        '=== DATE FILTER (row's stay = ETB2 -> ETU2 must overlap the requested range) ===
+        If hasDateFilter Then
+            If Not (IsDate(etbFillDate) And IsDate(etuFillDate)) Then GoTo NextRLoop
+            If Not DateRangesOverlap(CDate(etbFillDate), CDate(etuFillDate), _
+                                      hasDateFilter, dateFrom, dateTo) Then GoTo NextRLoop
+        End If
+        '================================================================================
+
+        Dim rowKey As String
+
+        rowKey = fillVals(etbCol) & "||" & _
+                 fillVals(etuCol) & "||" & _
+                 fillVals(vslCol)
+
+        Dim totalsArr() As Double
+
+        If dictAgg.Exists(rowKey) Then
+            totalsArr = dictAgg(rowKey)
+        Else
+            ReDim totalsArr(1 To nCols)
+            keyOrder.Add rowKey
+        End If
+
+        For cIdx = 1 To nCols
+
+            Dim cVal As Variant
+            cVal = dataRng.Cells(r, cIdx).Value
+
+            If IsNumeric(cVal) Then
+                totalsArr(cIdx) = totalsArr(cIdx) + CDbl(cVal)
+            End If
+
+        Next cIdx
+
+        dictAgg(rowKey) = totalsArr
+
+NextRLoop:
+    Next r
+
+    '--- Build HTML body rows ---
+    Dim bodyRows As String
+    Dim anyRow As Boolean
+
+    anyRow = False
+
+    Dim kk As Variant
+
+    For Each kk In keyOrder
+
+        Dim labels() As String
+        labels = Split(CStr(kk), "||")
+
+        Dim arrTot() As Double
+        arrTot = dictAgg(kk)
+
+        Dim hasAny As Boolean
+        hasAny = False
+
+        Dim rowTotal As Double
+        rowTotal = 0
+
+        Dim rowHtml As String
+
+        rowHtml = "<tr style='background-color:#FFF3E0;'>"
+
+        rowHtml = rowHtml & _
+            "<td style='text-align:left;padding:8px;white-space:nowrap;'>" & _
+            HtmlEncode(labels(0)) & "</td>"
+
+        rowHtml = rowHtml & _
+            "<td style='text-align:left;padding:8px;white-space:nowrap;'>" & _
+            HtmlEncode(labels(1)) & "</td>"
+
+        rowHtml = rowHtml & _
+            "<td style='text-align:left;padding:8px;white-space:nowrap;'>" & _
+            HtmlEncode(labels(2)) & "</td>"
+
+        For cIdx = 1 To nCols
+
+            If arrTot(cIdx) > 0 Then
+
+                hasAny = True
+                rowTotal = rowTotal + arrTot(cIdx)
+
+                rowHtml = rowHtml & _
+                    "<td style='text-align:center;padding:8px;color:#C00000;font-weight:bold;'>" & _
+                    HtmlEncode(CStr(CLng(arrTot(cIdx)))) & _
+                    "</td>"
+
+            Else
+
+                rowHtml = rowHtml & _
+                    "<td style='text-align:center;padding:8px;'>&nbsp;</td>"
+
+            End If
+
+        Next cIdx
+
+        rowHtml = rowHtml & _
+            "<td style='text-align:center;padding:8px;color:#C00000;font-weight:bold;'>" & _
+            HtmlEncode(CStr(CLng(rowTotal))) & _
+            "</td>"
+
+        rowHtml = rowHtml & "</tr>"
+
+        If hasAny Then
+            bodyRows = bodyRows & rowHtml
+            anyRow = True
+        End If
+
+    Next kk
+
+    If Not anyRow Then
+        BuildSelfServiceRedBlockHtml = ""
+        Exit Function
+    End If
+
+    Dim totalCols As Long
+    totalCols = 3 + nCols + 1
+
+    Dim html As String
+
+    html = "<br><br><p><b>Long Haul <span style='color:red;font-weight:bold;'>&gt;3km</span> to shift out due to <span style='color:red;font-weight:bold;'>top priority vessel</span></b></p>"
+    Dim longHaulFilterBits As String
+    If Len(filterStr) > 0 Then
+        longHaulFilterBits = "vessel(s): " & Replace(filterStr, "|", ", ")
+    End If
+    If hasDateFilter Then
+        If Len(longHaulFilterBits) > 0 Then longHaulFilterBits = longHaulFilterBits & "; "
+        longHaulFilterBits = longHaulFilterBits & "date: " & DateFilterDisplayText(hasDateFilter, dateFrom, dateTo)
+    End If
+    If Len(longHaulFilterBits) > 0 Then
+        html = html & "  <span style='font-weight:normal;'>(filtered to " & _
+               HtmlEncode(longHaulFilterBits) & ")</span>"
+    End If
+    html = html & "</p>"
+
+    html = html & _
+        "<table border='1' cellpadding='8' cellspacing='0' " & _
+        "style='border-collapse:collapse;font-family:Calibri;font-size:10.5pt;'>"
+
+    html = html & _
+        "<tr><td colspan='" & totalCols & "' " & _
+        "style='background-color:#FF8C00;color:#FFFFFF;font-weight:bold;text-align:center;font-size:12pt;padding:10px;'>" & _
+        "Long Haul</td></tr>"
+
+    html = html & _
+        "<tr style='background-color:#FFD580;font-weight:bold;'>"
+
+    html = html & _
+        "<td colspan='3' style='text-align:left;padding:8px;'>" & _
+        HtmlEncode(valCaption) & "</td>"
+
+    html = html & _
+        "<td colspan='" & nCols & "' style='text-align:center;padding:8px;'>" & _
+        HtmlEncode(colFieldCaption) & "</td>"
+
+    html = html & _
+        "<td style='padding:8px;'>&nbsp;</td>"
+
+    html = html & "</tr>"
+
+    html = html & _
+        "<tr style='background-color:#FFD580;font-weight:bold;'>"
+
+    html = html & _
+        "<th style='text-align:left;padding:8px;white-space:nowrap;'>ETB2</th>"
+
+    html = html & _
+        "<th style='text-align:left;padding:8px;white-space:nowrap;'>ETU2</th>"
+
+    html = html & _
+        "<th style='text-align:left;padding:8px;white-space:nowrap;'>Vsl_Voy2</th>"
+
+    For cIdx = 1 To nCols
+        html = html & _
+            "<th style='text-align:center;padding:8px;'>" & _
+            HtmlEncode(blockHeaders(cIdx)) & _
+            "</th>"
+    Next cIdx
+
+    html = html & _
+        "<th style='text-align:center;padding:8px;'>Grand Total</th>"
+
+    html = html & "</tr>"
+
+    html = html & bodyRows
+    html = html & "</table>"
+
+    BuildSelfServiceRedBlockHtml = html
+
+End Function
+ 
+
+'========================================================
+' BUILD LOAD_VESSEL_LIST LOOKUP DICTIONARY
+'========================================================
+Private Function BuildLoadVesselDict(ByVal wbL As Workbook) As Object
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+    dict.CompareMode = 1
+
+    Dim wsL As Worksheet
+    Dim sh  As Worksheet
+    For Each sh In wbL.Worksheets
+        If InStr(1, sh.Name, "Load_Vessel_List", vbTextCompare) > 0 Then
+            Set wsL = sh
+            Exit For
+        End If
+    Next sh
+
+    If wsL Is Nothing Then
+        For Each sh In wbL.Worksheets
+            If FindColumnContains(sh, "LOAD OVERSTOW", 30) > 0 And _
+               FindColumnContains(sh, "PORTMARK OVERSTOW", 30) > 0 Then
+                Set wsL = sh
+                Exit For
+            End If
+        Next sh
+    End If
+    If wsL Is Nothing Then Set wsL = wbL.ActiveSheet
+
+    Dim hdrL As Long
+    hdrL = FindColumnContainsRow(wsL, "LOAD OVERSTOW", 50)
+    If hdrL = 0 Then hdrL = FindColumnContainsRow(wsL, "PORTMARK OVERSTOW", 50)
+    If hdrL = 0 Then hdrL = 1
+
+    Dim colVslL As Long
+    colVslL = FindColAny(wsL, hdrL, Array("VSL / OUTVOY", "VSL / OUT LINE", "Vessel Name", "VSL", "VESSEL"))
+    If colVslL = 0 Then
+        Dim rr As Long
+        For rr = 1 To hdrL
+            Dim cc As Range
+            Set cc = wsL.Rows(rr).Find(What:="VSL", LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+            If Not cc Is Nothing Then
+                colVslL = cc.Column
+                If hdrL < rr Then hdrL = rr
+                Exit For
+            End If
+        Next rr
+    End If
+    If colVslL = 0 Then
+        Set BuildLoadVesselDict = dict
+        Exit Function
+    End If
+
+    Dim colLO  As Long
+    Dim colPO  As Long
+    Dim colMWO As Long
+    colLO = FindColumnContains(wsL, "LOAD OVERSTOW", hdrL + 5)
+    colPO = FindColumnContains(wsL, "PORTMARK OVERSTOW", hdrL + 5)
+    colMWO = FindColumnContains(wsL, "MIX WEIGHT OVERSTOW", hdrL + 5)
+
+    Dim lastRowL As Long
+    lastRowL = LastDataRow(wsL, colVslL, hdrL)
+
+    Dim rl     As Long
+    Dim vslKey As String
+    Dim vslRaw As String
+    Dim loVal  As Variant
+    Dim poVal  As Variant
+    Dim mwoVal As Variant
+
+    For rl = hdrL + 1 To lastRowL
+        vslRaw = CleanText(wsL.Cells(rl, colVslL).Value)
+        If Len(vslRaw) = 0 Then GoTo NextLoadRow
+        If UCase$(vslRaw) = "GRAND TOTAL" Or UCase$(vslRaw) = "TOTAL" Then GoTo NextLoadRow
+
+        vslKey = VslBaseName(vslRaw)
+        If Len(vslKey) = 0 Then GoTo NextLoadRow
+
+        loVal = 0
+        poVal = 0
+        mwoVal = 0
+        If colLO > 0 Then loVal = wsL.Cells(rl, colLO).Value
+        If colPO > 0 Then poVal = wsL.Cells(rl, colPO).Value
+        If colMWO > 0 Then mwoVal = wsL.Cells(rl, colMWO).Value
+
+        Dim dLO  As Double
+        Dim dPO  As Double
+        Dim dMWO As Double
+        dLO = 0
+        dPO = 0
+        dMWO = 0
+        If Not IsError(loVal) And IsNumeric(loVal) Then dLO = CDbl(loVal)
+        If Not IsError(poVal) And IsNumeric(poVal) Then dPO = CDbl(poVal)
+        If Not IsError(mwoVal) And IsNumeric(mwoVal) Then dMWO = CDbl(mwoVal)
+
+        If Not dict.Exists(vslKey) Then
+            dict.Add vslKey, Array(dLO, dPO, dMWO)
+        Else
+            Dim existing As Variant
+            existing = dict(vslKey)
+            Dim newLO  As Double
+            Dim newPO  As Double
+            Dim newMWO As Double
+            newLO = 0
+            newPO = 0
+            newMWO = 0
+            If Not IsError(existing(0)) And IsNumeric(existing(0)) Then newLO = CDbl(existing(0))
+            If Not IsError(existing(1)) And IsNumeric(existing(1)) Then newPO = CDbl(existing(1))
+            If Not IsError(existing(2)) And IsNumeric(existing(2)) Then newMWO = CDbl(existing(2))
+            newLO = newLO + dLO
+            newPO = newPO + dPO
+            newMWO = newMWO + dMWO
+            dict(vslKey) = Array(newLO, newPO, newMWO)
+        End If
+NextLoadRow:
+    Next rl
+
+    Set BuildLoadVesselDict = dict
+End Function
+
+'========================================================
+' BUSINESS RULES
+'========================================================
+Private Function NormalizePct(ByVal v As Variant) As Variant
+    If IsError(v) Then Exit Function
+    If Len(CStr(v)) = 0 Then Exit Function
+    If Not IsNumeric(v) Then Exit Function
+    Dim x As Double
+    x = CDbl(v)
+    If x < 0 Then Exit Function
+    If x > 1 And x <= 100 Then x = x / 100#
+    NormalizePct = x
+End Function
+
+Private Function IsAllowedTRMNL(ByVal s As String) As Boolean
+    s = UCase$(Trim$(s))
+    IsAllowedTRMNL = (s = "P56SE" Or s = "PPT4")
+End Function
+
+Private Function IsBadBTH(ByVal s As String, Optional ByVal badStarts As String = "BTK") As Boolean
+    s = UCase$(Trim$(s))
+    If Len(s) = 0 Then
+        IsBadBTH = False
+    Else
+        IsBadBTH = (InStr(1, badStarts, Left$(s, 1), vbTextCompare) > 0)
+    End If
+End Function
+
+Private Function VslBaseName(ByVal s As String) As String
+    s = Trim$(s)
+    Dim pos As Long
+    pos = InStr(s, "/")
+    If pos > 1 Then
+        VslBaseName = UCase$(Trim$(Left$(s, pos - 1)))
+    Else
+        VslBaseName = UCase$(s)
+    End If
+End Function
+
+'========================================================
+' EMAIL HELPERS
+'========================================================
+Private Function GetToAddressSmart() As String
+    On Error Resume Next
+    GetToAddressSmart = Trim$(CStr(ThisWorkbook.ActiveSheet.Range("C5").Value))
+    If Len(GetToAddressSmart) = 0 Then
+        GetToAddressSmart = Trim$(CStr(ThisWorkbook.Worksheets(1).Range("C5").Value))
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function HtmlEncode(ByVal s As String) As String
+    s = CStr(s)
+    s = Replace(s, "&", "&amp;")
+    s = Replace(s, "<", "&lt;")
+    s = Replace(s, ">", "&gt;")
+    s = Replace(s, """", "&quot;")
+    HtmlEncode = s
+End Function
+
+
+Private Function ServicingRowHasData(ByVal ws As Worksheet, ByVal r As Long, ByVal startCol As Long, ByVal lastCol As Long) As Boolean
+    Dim c As Long, v As Variant
+    For c = startCol To lastCol
+        v = ws.Cells(r, c).Value
+        If Not IsError(v) Then
+            If IsNumeric(v) Then
+                If CDbl(v) <> 0 Then
+                    ServicingRowHasData = True
+                    Exit Function
+                End If
+            Else
+                If Len(Trim$(CStr(v))) > 0 Then
+                    ServicingRowHasData = True
+                    Exit Function
+                End If
+            End If
+        End If
+    Next c
+    ServicingRowHasData = False
+End Function
+
+'========================================================
+' VESSEL FOCUS CARDS
+'========================================================
+Private Function TerminalFromBerth(ByVal berthRaw As String) As String
+    Dim s As String
+    s = UCase$(CleanText(berthRaw))
+    Dim i As Long, ch As String, numStr As String
+    Dim berthNum As Long
+
+    For i = 1 To Len(s)
+        ch = Mid$(s, i, 1)
+        If ch = "P" And i < Len(s) Then
+            If IsNumeric(Mid$(s, i + 1, 1)) Then
+                numStr = ""
+                Dim j As Long
+                j = i + 1
+                Do While j <= Len(s) And IsNumeric(Mid$(s, j, 1))
+                    numStr = numStr & Mid$(s, j, 1)
+                    j = j + 1
+                Loop
+                If Len(numStr) > 0 Then
+                    berthNum = CLng(numStr)
+                    If berthNum >= 27 And berthNum <= 29 Then
+                        TerminalFromBerth = "P4SE"
+                    ElseIf berthNum >= 30 Then
+                        TerminalFromBerth = "P56SE"
+                    Else
+                        TerminalFromBerth = "Terminal " & berthNum
+                    End If
+                    Exit Function
+                End If
+            End If
+        End If
+    Next i
+    TerminalFromBerth = "Terminal"
+End Function
+
+Private Function BuildVesselCardsHtml(ByVal folderPath As String, ByVal filterStr As String, _
+                                       Optional ByVal hasDateFilter As Boolean = False, _
+                                       Optional ByVal dateFrom As Date = 0, _
+                                       Optional ByVal dateTo As Date = 0) As String
+    Dim wbL As Workbook
+    Set wbL = GetLoadVesselListWb(folderPath)
+    If wbL Is Nothing Then
+        BuildVesselCardsHtml = ""
+        Exit Function
+    End If
+
+    Dim wsL As Worksheet, sh As Worksheet
+    For Each sh In wbL.Worksheets
+        If InStr(1, sh.Name, "Load_Vessel_List", vbTextCompare) > 0 Then
+            Set wsL = sh
+            Exit For
+        End If
+    Next sh
+    If wsL Is Nothing Then
+        For Each sh In wbL.Worksheets
+            If FindColumnContains(sh, "LOAD OVERSTOW", 30) > 0 Then
+                Set wsL = sh
+                Exit For
+            End If
+        Next sh
+    End If
+    If wsL Is Nothing Then Set wsL = wbL.ActiveSheet
+
+    Dim hdrL As Long
+    hdrL = FindColumnContainsRow(wsL, "LOAD OVERSTOW", 50)
+    If hdrL = 0 Then
+        BuildVesselCardsHtml = ""
+        Exit Function
+    End If
+
+    Dim colVsl As Long, colVoy As Long, colSvc As Long, colDir As Long
+    Dim colEtb As Long, colEtu As Long, colBTH As Long, colVol As Long
+    Dim colLO As Long, colPO As Long, colMWO As Long, colPhantom As Long
+
+    colVsl = FindColByHeader(wsL, hdrL, "VESSEL")
+    colVoy = FindColByHeader(wsL, hdrL, "VOYAGE")
+    colSvc = FindColByHeader(wsL, hdrL, "SVC")
+    colDir = FindColByHeader(wsL, hdrL, "DIR")
+    colEtb = FindColByHeader(wsL, hdrL, "ETB")
+    colEtu = FindColByHeader(wsL, hdrL, "ETU")
+    colBTH = FindColByHeader(wsL, hdrL, "BERTH")
+    colVol = FindColByHeader(wsL, hdrL, "LOAD VOLUME")
+    colLO = FindColumnContains(wsL, "LOAD OVERSTOW", hdrL + 5)
+    colPO = FindColumnContains(wsL, "PORTMARK OVERSTOW", hdrL + 5)
+    colMWO = FindColumnContains(wsL, "MIX WEIGHT OVERSTOW", hdrL + 5)
+    colPhantom = FindColumnContains(wsL, "PHANTOM LOCATION", hdrL + 5)
+
+    If colVsl = 0 Or colBTH = 0 Then
+        BuildVesselCardsHtml = ""
+        Exit Function
+    End If
+
+    Dim lastRowL As Long
+    lastRowL = LastDataRow(wsL, colVsl, hdrL)
+
+    Dim html As String
+    Dim r As Long
+    Dim vslName As String, voy As String, svc As String, dir As String
+    Dim bth As String, term As String
+    Dim lo As Double, po As Double, mwo As Double, phantom As Double
+    Dim etbStr As String, etuStr As String
+
+    For r = hdrL + 1 To lastRowL
+        vslName = CleanText(wsL.Cells(r, colVsl).Value)
+        If Len(vslName) = 0 Then GoTo NextCardRow
+        If UCase$(vslName) = "GRAND TOTAL" Or UCase$(vslName) = "TOTAL" Then GoTo NextCardRow
+        If Not MatchesAnyVessel(vslName, filterStr) Then GoTo NextCardRow
+        ' NOTE: vessel cards are intentionally NOT date-filtered - the date
+        ' filter only applies to the Long Haul (aRMG) table further down.
+
+        lo = 0: po = 0: mwo = 0: phantom = 0
+        If colLO > 0 And IsNumeric(wsL.Cells(r, colLO).Value) Then lo = CDbl(wsL.Cells(r, colLO).Value)
+        If colPO > 0 And IsNumeric(wsL.Cells(r, colPO).Value) Then po = CDbl(wsL.Cells(r, colPO).Value)
+        If colMWO > 0 And IsNumeric(wsL.Cells(r, colMWO).Value) Then mwo = CDbl(wsL.Cells(r, colMWO).Value)
+        If colPhantom > 0 And IsNumeric(wsL.Cells(r, colPhantom).Value) Then phantom = CDbl(wsL.Cells(r, colPhantom).Value)
+
+        If lo <= 0 And po <= 0 And mwo <= 0 And phantom <= 0 Then GoTo NextCardRow
+
+        voy = IIf(colVoy > 0, CleanText(wsL.Cells(r, colVoy).Value), "")
+        svc = IIf(colSvc > 0, CleanText(wsL.Cells(r, colSvc).Value), "")
+        dir = IIf(colDir > 0, CleanText(wsL.Cells(r, colDir).Value), "")
+        bth = CleanText(wsL.Cells(r, colBTH).Value)
+        term = TerminalFromBerth(bth)
+
+        etbStr = ""
+        etuStr = ""
+        If colEtb > 0 Then
+            If IsDate(wsL.Cells(r, colEtb).Value) Then
+                etbStr = Format(wsL.Cells(r, colEtb).Value, "dd/mm/yyyy hh:mm")
+            Else
+                etbStr = CleanText(wsL.Cells(r, colEtb).Value)
+            End If
+        End If
+        If colEtu > 0 Then
+            If IsDate(wsL.Cells(r, colEtu).Value) Then
+                etuStr = Format(wsL.Cells(r, colEtu).Value, "dd/mm/yyyy hh:mm")
+            Else
+                etuStr = CleanText(wsL.Cells(r, colEtu).Value)
+            End If
+        End If
+
+        html = html & "<p style='margin:14px 0 4px 0;'>&#8226; For <b>" & HtmlEncode(term) & _
+               "</b>, focus to complete <b>" & HtmlEncode(vslName) & " / " & HtmlEncode(voy) & "</b></p>"
+
+        html = html & "<table border='0' cellpadding='8' cellspacing='0' style='border-collapse:collapse;" & _
+               "font-family:Calibri;font-size:10.5pt;margin-bottom:18px;'>"
+        html = html & "<tr style='background-color:#1F3864;color:#FFFFFF;font-weight:bold;text-align:center;'>" & _
+               "<th>VESSEL / VOYAGE<br><span style='font-weight:normal;font-size:9pt;'>SVC-DIR</span></th>" & _
+               "<th>ETB</th><th>ETU</th><th>BERTH</th><th>LOAD VOLUME</th>" & _
+               "<th>LOAD<br>OVERSTOW</th><th>PORTMARK<br>OVERSTOW</th>" & _
+               "<th>MIX WEIGHT<br>OVERSTOW</th><th>PHANTOM<br>LOCATION</th></tr>"
+
+        html = html & "<tr style='background-color:#F3E5F5;text-align:center;'>"
+        html = html & "<td style='text-align:left;'><b>" & HtmlEncode(vslName) & " / " & HtmlEncode(voy) & "</b><br>" & _
+               HtmlEncode(svc) & "-" & HtmlEncode(dir) & "</td>"
+        html = html & "<td>" & HtmlEncode(etbStr) & "</td>"
+        html = html & "<td>" & HtmlEncode(etuStr) & "</td>"
+        html = html & "<td>" & HtmlEncode(bth) & "</td>"
+        html = html & "<td>" & HtmlEncode(IIf(colVol > 0, CStr(wsL.Cells(r, colVol).Value), "")) & "</td>"
+        html = html & "<td>" & HtmlEncode(CStr(CLng(lo))) & "</td>"
+        html = html & "<td>" & HtmlEncode(CStr(CLng(po))) & "</td>"
+        html = html & "<td>" & HtmlEncode(CStr(CLng(mwo))) & "</td>"
+        html = html & "<td>" & HtmlEncode(CStr(CLng(phantom))) & "</td>"
+        html = html & "</tr></table>"
+NextCardRow:
+    Next r
+    html = html & "<p style='margin:10px 0 0 0;'>Once SPD advise to cut for shifting, please float up loading containers by shuffling to resolve any overstow.</p>"
+    html = html & "<p style='margin:6px 0 0 0;'><b>P456SE team:</b> Kindly review and advise on the PM support to ensure timely completion of IYS shifting.</p>"
+    html = html & "<p style='margin:6px 0 12px 0;'>IYS team, <b>@MOHAMED SAH BIN BANI, YOD</b>, <b>@TAN CHIN SIONG, YOD</b>, kindly take note of the vessel priority to shift and update in your shift report on balance to shift or completed.</p>"
+
+    BuildVesselCardsHtml = html
+End Function
+
+'========================================================
+' PIVOT HELPERS
+'========================================================
+Private Sub AddValueFieldSafe( _
+    ByVal pt As PivotTable, _
+    ByVal srcField As String, _
+    ByVal caption As String, _
+    ByVal numFormat As String)
+    Dim pf As PivotField
+    On Error Resume Next
+    Set pf = pt.PivotFields(srcField)
+    On Error GoTo 0
+    If pf Is Nothing Then Exit Sub
+    HidePivotFieldSafe pt, srcField
+    On Error Resume Next
+    pf.Orientation = xlDataField
+    pf.caption = caption
+    pf.NumberFormat = numFormat
+    On Error GoTo 0
+End Sub
+
+Private Sub HidePivotFieldSafe( _
+    ByVal pt As PivotTable, _
+    ByVal fieldName As String)
+    Dim pf As PivotField
+    On Error Resume Next
+    Set pf = pt.PivotFields(fieldName)
+    If Not pf Is Nothing Then pf.Orientation = xlHidden
+    On Error GoTo 0
+End Sub
+
+'========================================================
+' FILTER: PPT4 + PPT5 ONLY, TUAS HIDDEN
+'========================================================
+Private Sub FilterPivot_PPT4_PPT5_ExplicitNoTuas(ByVal pt As PivotTable)
+    Dim pf  As PivotField
+    Dim pi  As PivotItem
+    Dim allowedItems As Variant
+    Dim a As Long
+    Dim isAllowed As Boolean
+    allowedItems = Array("PPT4", "PPT5")
+
+    On Error Resume Next
+    Set pf = pt.PivotFields("vsl2_bthTerm")
+    On Error GoTo 0
+    If pf Is Nothing Then
+        MsgBox "Field 'vsl2_bthTerm' not found in pivot table.", vbExclamation
+        Exit Sub
+    End If
+
+    If pf.Orientation = xlPageField Then
+        On Error Resume Next
+        pf.CurrentPage = "(All)"
+        On Error GoTo 0
+    End If
+
+    pt.ManualUpdate = True
+    pf.EnableMultiplePageItems = True
+
+    For Each pi In pf.PivotItems
+        On Error Resume Next
+        pi.Visible = True
+        On Error GoTo 0
+    Next pi
+
+    For Each pi In pf.PivotItems
+        isAllowed = False
+        For a = LBound(allowedItems) To UBound(allowedItems)
+            If StrComp(pi.Name, CStr(allowedItems(a)), vbTextCompare) = 0 Then
+                isAllowed = True
+                Exit For
+            End If
+        Next a
+        If Not isAllowed Then
+            On Error Resume Next
+            pi.Visible = False
+            On Error GoTo 0
+        End If
+    Next pi
+
+    On Error Resume Next
+    pf.PivotItems("Tuas").Visible = False
+    On Error GoTo 0
+
+    pt.ManualUpdate = False
+End Sub
+
+Private Sub FilterPivot_Berth_P1_To_P41(ByVal pt As PivotTable)
+    Dim pf As PivotField
+    Dim pi As PivotItem
+    Dim i As Long
+    On Error Resume Next
+    Set pf = pt.PivotFields("berth")
+    On Error GoTo 0
+    If pf Is Nothing Then Exit Sub
+    pf.EnableMultiplePageItems = True
+    For Each pi In pf.PivotItems
+        On Error Resume Next
+        pi.Visible = False
+        On Error GoTo 0
+    Next pi
+    For i = 1 To 41
+        On Error Resume Next
+        pf.PivotItems("P" & i).Visible = True
+        On Error GoTo 0
+    Next i
+End Sub
+
+'========================================================
+' DEBUG SUBS
+'========================================================
+Private Sub Debug_PPT5_Berths()
+    Dim pt As PivotTable
+    Dim pf As PivotField
+    Dim pi As PivotItem
+    Dim msg As String
+    Set pt = ActiveSheet.PivotTables(1)
+    On Error Resume Next
+    Set pf = pt.PivotFields("berth")
+    On Error GoTo 0
+    If pf Is Nothing Then
+        MsgBox "No 'berth' field found in pivot!"
+        Exit Sub
+    End If
+    For Each pi In pf.PivotItems
+        msg = msg & pi.Name & " | Visible: " & pi.Visible & vbCrLf
+    Next pi
+    MsgBox msg, vbInformation, "All Berth Items"
+End Sub
+
+Private Sub Debug_Full_Pivot_State()
+    Dim pt As PivotTable
+    Dim pf As PivotField
+    Dim pi As PivotItem
+    Dim msg As String
+    Dim pfAll As PivotField
+    Set pt = ActiveSheet.PivotTables(1)
+    msg = "=== vsl2_bthTerm ===" & vbCrLf
+    Set pf = pt.PivotFields("vsl2_bthTerm")
+    For Each pi In pf.PivotItems
+        msg = msg & pi.Name & " | Visible: " & pi.Visible & vbCrLf
+    Next pi
+    msg = msg & vbCrLf & "=== alongSide ===" & vbCrLf
+    On Error Resume Next
+    Set pf = pt.PivotFields("alongSide")
+    If Not pf Is Nothing Then
+        msg = msg & "CurrentPage: " & pf.CurrentPage & vbCrLf
+    Else
+        msg = msg & "Field not found" & vbCrLf
+    End If
+    On Error GoTo 0
+    msg = msg & vbCrLf & "=== doubleBerthing ===" & vbCrLf
+    On Error Resume Next
+    Set pf = pt.PivotFields("doubleBerthing")
+    If Not pf Is Nothing Then
+        msg = msg & "CurrentPage: " & pf.CurrentPage & vbCrLf
+    Else
+        msg = msg & "Field not found" & vbCrLf
+    End If
+    On Error GoTo 0
+    msg = msg & vbCrLf & "=== ALL PAGE FIELDS ===" & vbCrLf
+    For Each pfAll In pt.PageFields
+        On Error Resume Next
+        msg = msg & pfAll.Name & " = " & pfAll.CurrentPage & vbCrLf
+        On Error GoTo 0
+    Next pfAll
+    If Len(msg) > 1000 Then
+        MsgBox Left$(msg, 1000), vbInformation, "Pivot State Part 1"
+        MsgBox Mid$(msg, 1001), vbInformation, "Pivot State Part 2"
+    Else
+        MsgBox msg, vbInformation, "Pivot State"
+    End If
+End Sub
+
+'========================================================
+' MAIN 1: SWITCH PIVOT TO OVERSTOW VIEW
+'========================================================
+Private Sub Switch_Pivot_To_Overstow_PPT4_PPT5_NoTuas_P1toP41()
+    Dim ws As Worksheet
+    Dim pt As PivotTable
+    Set ws = ActiveSheet
+    If ws.PivotTables.Count = 0 Then
+        MsgBox "No PivotTable found on this sheet.", vbCritical
+        Exit Sub
+    End If
+    Set pt = ws.PivotTables(1)
+    Application.ScreenUpdating = False
+    pt.ManualUpdate = True
+    On Error Resume Next
+    pt.PivotFields("alongSide").ClearAllFilters
+    pt.PivotFields("alongSide").CurrentPage = "(All)"
+    pt.PivotFields("doubleBerthing").ClearAllFilters
+    pt.PivotFields("doubleBerthing").CurrentPage = "(All)"
+    On Error GoTo 0
+    HidePivotFieldSafe pt, "%Small_Lot"
+    AddValueFieldSafe pt, "%Overstow", "%Overs", "0%"
+    AddValueFieldSafe pt, "%Overstow_inClr", "Overstow_in", "0.0000"
+    AddValueFieldSafe pt, "%Overstow_outClr", "Overstow_out", "0.0000"
+    ForceValuesToColumns pt
+    HidePivotFieldSafe pt, "Clrs"
+    HidePivotFieldSafe pt, "avgSlots"
+    HidePivotFieldSafe pt, "boxPerClr"
+    FilterPivot_PPT4_PPT5_ExplicitNoTuas pt
+    FilterPivot_Berth_P1_To_P41 pt
+    pt.ManualUpdate = False
+    Application.ScreenUpdating = True
+End Sub
+
+'========================================================
+' MAIN 2: BUILD FINAL SHEET
+'========================================================
+Private Sub Build_FINAL_Smart_LOOKUP(ByVal filterStr As String, _
+                                      Optional ByVal hasDateFilter As Boolean = False, _
+                                      Optional ByVal dateFrom As Date = 0, _
+                                      Optional ByVal dateTo As Date = 0)
+
+    Dim folderPath As String
+    folderPath = ThisWorkbook.Path
+
+    '--- 1. VESSEL WORKBOOK ---
+    Dim wbV As Workbook
+    Dim wsV As Worksheet
+    Set wbV = GetVesselWorkbookSmart(folderPath)
+    If wbV Is Nothing Then
+        MsgBox "Cannot find/open the vessel report file.", vbExclamation
+        Exit Sub
+    End If
+    Dim sh As Worksheet
+    For Each sh In wbV.Worksheets
+        If SheetLooksLikeVessel(sh) Then Set wsV = sh: Exit For
+    Next sh
+    If wsV Is Nothing Then
+        MsgBox "Found workbook but cannot locate the vessel sheet.", vbExclamation
+        Exit Sub
+    End If
+
+    '--- 2. YARD BUILDUP QUALITY WORKBOOK ---
+    Dim wbY As Workbook
+    Dim wsY As Worksheet
+    Set wbY = GetWbByNamePart("Yard_Buildup_Quality")
+    If wbY Is Nothing Then
+        Set wbY = OpenLatestFile(folderPath, "Yard_Buildup_Quality*.xlsm")
+        If wbY Is Nothing Then Set wbY = OpenLatestFile(folderPath, "Yard_Buildup_Quality*.xlsx")
+    End If
+    If wbY Is Nothing Then
+        MsgBox "Cannot find Yard_Buildup_Quality in folder: " & folderPath, vbExclamation
+        Exit Sub
+    End If
+    Dim wsYFound As Boolean: wsYFound = False
+    Dim shY As Worksheet
+    For Each shY In wbY.Worksheets
+        If LCase$(shY.Name) = "cluster_quality" Then
+            Set wsY = shY: wsYFound = True: Exit For
+        End If
+    Next shY
+    If Not wsYFound Then
+        For Each shY In wbY.Worksheets
+            If FindHeaderRow(shY, "%Overstow_inClr", 30) > 0 Then
+                Set wsY = shY: wsYFound = True: Exit For
+            End If
+        Next shY
+    End If
+    If Not wsYFound Then Set wsY = wbY.ActiveSheet
+
+    '--- 3. LOAD_VESSEL_LIST WORKBOOK ---
+    Dim wbL As Workbook
+    Set wbL = GetLoadVesselListWb(folderPath)
+    Dim dictLoad As Object
+    If wbL Is Nothing Then
+        MsgBox "WARNING: Load_Vessel_List file not found." & vbCrLf & _
+               "LOAD / PORTMARK / MIX WEIGHT OVERSTOW columns will be blank." & vbCrLf & _
+               "Continuing with other data...", vbExclamation
+        Set dictLoad = CreateObject("Scripting.Dictionary")
+        dictLoad.CompareMode = 1
+    Else
+        Set dictLoad = BuildLoadVesselDict(wbL)
+        If dictLoad.Count = 0 Then
+            MsgBox "WARNING: Load_Vessel_List opened but no data could be read." & vbCrLf & _
+                   "Check that the sheet contains VSL and OVERSTOW columns.", vbExclamation
+        End If
+    End If
+
+    '--- 4. SERVICING WORKBOOK (optional) ---
+    Dim wbS As Workbook
+    Dim wsS As Worksheet
+    Set wbS = GetServicingWb(folderPath)
+    If Not wbS Is Nothing Then Set wsS = GetServicingSheet(wbS)
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Application.EnableEvents = False
+    On Error GoTo FailSafe
+
+    '--- Vessel column indices ---
+    Dim hdrV As Long, dataStartV As Long, lastRowV As Long
+    Dim colVSL_V As Long, colTRMNL As Long, colBTH   As Long
+    Dim colETB_V As Long, colETU_V As Long
+    Dim colDecl  As Long, colDisc  As Long, colLoad  As Long
+    Dim colDeclLR As Long, colActLR As Long
+
+    hdrV = FindHeaderRow(wsV, "TRMNL", 150)
+    If hdrV = 0 Then hdrV = FindHeaderRow(wsV, "VSL", 150)
+    If hdrV = 0 Then Err.Raise vbObjectError + 1, , "Cannot find vessel header row."
+    dataStartV = hdrV + 1
+
+    colVSL_V = FindColAny(wsV, hdrV, Array("VSL / OUTVOY", "VSL / OUT LINE", "VSL"))
+    colTRMNL = FindColByHeader(wsV, hdrV, "TRMNL")
+    colBTH = FindColByHeader(wsV, hdrV, "BTH")
+    colETB_V = FindColAny(wsV, hdrV, Array("ETB", "ETB2"))
+    colETU_V = FindColAny(wsV, hdrV, Array("ETU", "ETU2"))
+    colDecl = FindColAny(wsV, hdrV, Array("Declared (Ctrs)", "Declared"))
+    colDisc = FindColAny(wsV, hdrV, Array("Disc(Ctrs)", "Disc (Ctrs)"))
+    colLoad = FindColAny(wsV, hdrV, Array("Load (Ctrs)", "Load"))
+    colDeclLR = FindColAny(wsV, hdrV, Array("Declared L&R (Ctrs)", "Declared L", "Declared L&R"))
+    colActLR = FindColAny(wsV, hdrV, Array("Actual L&R (Ctrs)", "Actual L&R", "Actual"))
+
+    If colVSL_V = 0 Or colTRMNL = 0 Or colBTH = 0 Or colETB_V = 0 Then
+        Err.Raise vbObjectError + 2, , "Missing required vessel columns (VSL, TRMNL, BTH or ETB)."
+    End If
+    lastRowV = LastDataRow(wsV, colVSL_V, hdrV)
+
+    '--- Yard column indices ---
+    Dim hdrY As Long, hdrY_top As Long, dataStartY As Long, lastRowY As Long
+    Dim colVSL_Y As Long, colBTH_Y As Long
+    Dim colInY   As Long, colOutY  As Long, colTotY As Long
+
+    hdrY = FindHeaderRowExact(wsY, "berth", 150)
+    If hdrY = 0 Then hdrY = FindHeaderRowExact(wsY, "ETB", 150)
+    If hdrY = 0 Then hdrY = FindHeaderRowExact(wsY, "Vsl", 150)
+    If hdrY = 0 Then Err.Raise vbObjectError + 3, , "Cannot find Yard header row (berth/ETB/Vsl)."
+
+    hdrY_top = hdrY - 1
+    If hdrY_top < 1 Then hdrY_top = hdrY
+    dataStartY = hdrY + 1
+
+    colTotY = FindColAny(wsY, hdrY_top, Array("%Overs", "%Overstow", "%Overstow_inClr"))
+    colInY = FindColAny(wsY, hdrY_top, Array("Overstow_in", "%Overstow_inClr"))
+    colOutY = FindColAny(wsY, hdrY_top, Array("Overstow_out", "%Overstow_outClr"))
+    colVSL_Y = FindColAny(wsY, hdrY, Array("Vsl", "VSL / OUTVOY", "Vsl_Voy2", "Vsl_Voy", "VSL", "Vessel"))
+    colBTH_Y = FindColAny(wsY, hdrY, Array("berth", "BTH", "Berth"))
+
+    If colInY = 0 Or colOutY = 0 Or colTotY = 0 Or colVSL_Y = 0 Then
+        Err.Raise vbObjectError + 4, , "Yard sheet missing Vsl or %Overstow columns." & vbCrLf & _
+            "colTotY=" & colTotY & " colInY=" & colInY & _
+            " colOutY=" & colOutY & " colVSL_Y=" & colVSL_Y & vbCrLf & _
+            "hdrY=" & hdrY & " hdrY_top=" & hdrY_top
+    End If
+    If colBTH_Y = 0 Then
+        MsgBox "WARNING: Yard 'berth' column not found. Matching by vessel name only.", vbExclamation
+    End If
+    lastRowY = LastDataRow(wsY, colVSL_Y, hdrY)
+
+    '--- Build Yard lookup dictionary ---
+    Dim dictYard As Object: Set dictYard = CreateObject("Scripting.Dictionary")
+    dictYard.CompareMode = 1
+    Dim ry As Long, k As String
+    Dim vslYBase As String
+    Dim lastBerthY As String: lastBerthY = ""
+    Dim arrVal As Variant
+
+    For ry = dataStartY To lastRowY
+        Dim rawBerthY As String
+        If colBTH_Y > 0 Then
+            rawBerthY = UCase$(Trim$(CleanText(wsY.Cells(ry, colBTH_Y).Value)))
+            If Len(rawBerthY) > 0 And rawBerthY <> "GRAND TOTAL" Then lastBerthY = rawBerthY
+        End If
+        Dim rawVslY As String
+        rawVslY = CleanText(wsY.Cells(ry, colVSL_Y).Value)
+        If Len(rawVslY) = 0 Then GoTo NextYardRow
+        If UCase$(rawVslY) = "GRAND TOTAL" Then GoTo NextYardRow
+        vslYBase = UCase$(Trim$(rawVslY))
+        arrVal = Array( _
+            NormalizePct(wsY.Cells(ry, colInY).Value), _
+            NormalizePct(wsY.Cells(ry, colOutY).Value), _
+            NormalizePct(wsY.Cells(ry, colTotY).Value))
+        If Len(lastBerthY) > 0 Then
+            k = lastBerthY & "|" & vslYBase
+            If Not dictYard.Exists(k) Then dictYard.Add k, arrVal
+        End If
+        If Not dictYard.Exists(vslYBase) Then dictYard.Add vslYBase, arrVal
+NextYardRow:
+    Next ry
+
+    '--- Create / clear FINAL sheet ---
+    Dim wsOut As Worksheet
+    On Error Resume Next
+    Set wsOut = wbV.Worksheets("FINAL")
+    On Error GoTo FailSafe
+    If wsOut Is Nothing Then
+        Set wsOut = wbV.Worksheets.Add(After:=wbV.Worksheets(wbV.Worksheets.Count))
+        wsOut.Name = "FINAL"
+    Else
+        wsOut.Cells.Clear
+    End If
+
+    '--- Write headers ---
+    Dim headersVessel As Variant, headersOver As Variant, headersBlank As Variant
+    headersVessel = Array("VSL / OUTVOY", "TRMNL", "BTH", "ETB", "ETU", _
+                          "Declared (Ctrs)", "Disc(Ctrs)", "Load (Ctrs)", _
+                          "Declared L&R (Ctrs)", "Actual L&R (Ctrs)")
+    headersOver = Array("%Overstow_inClr", "%Overstow_outClr", "%Overstow")
+    headersBlank = Array("LOAD OVERSTOW", "PORTMARK OVERSTOW", "MIX WEIGHT OVERSTOW", _
+                          "IYS PG", "Cntrs raised (YP to update)", _
+                          "Shifting progress", "YP remarks", "SP Remarks")
+
+    Dim oc As Long: oc = 1
+    Dim i As Long
+    For i = LBound(headersVessel) To UBound(headersVessel)
+        wsOut.Cells(1, oc).Value = headersVessel(i): oc = oc + 1
+    Next i
+    For i = LBound(headersOver) To UBound(headersOver)
+        wsOut.Cells(1, oc).Value = headersOver(i): oc = oc + 1
+    Next i
+    For i = LBound(headersBlank) To UBound(headersBlank)
+        wsOut.Cells(1, oc).Value = headersBlank(i): oc = oc + 1
+    Next i
+    wsOut.Rows(1).Font.Bold = True
+
+    Const overColStart As Long = 11
+
+    '--- Fill FINAL rows ---
+    Dim outRow As Long: outRow = 2
+    Dim rv As Long
+    Dim arrO As Variant, arrL As Variant
+    Dim foundYard As Boolean, foundLoad As Boolean
+    Dim vslV As String, vslVBase As String, vslVKey As String
+    Dim bthV As String, trm As String, bth As String
+    Dim matchedYard As Long: matchedYard = 0
+    Dim matchedLoad As Long: matchedLoad = 0
+    Dim unmatchedList As String
+
+    For rv = dataStartV To lastRowV
+        vslV = CleanText(wsV.Cells(rv, colVSL_V).Value)
+        If Len(vslV) = 0 Then GoTo NextV
+        trm = CleanText(wsV.Cells(rv, colTRMNL).Value)
+        bth = CleanText(wsV.Cells(rv, colBTH).Value)
+        If Not IsAllowedTRMNL(trm) Then GoTo NextV
+        If IsBadBTH(bth, "BTK") Then GoTo NextV
+
+        '=== MULTI-VESSEL FILTER ===
+        If Not MatchesAnyVessel(vslV, filterStr) Then GoTo NextV
+        '===========================
+        ' NOTE: the FINAL sheet (Table 1 / vessel cards) is intentionally NOT
+        ' date-filtered - the date filter only applies to the Long Haul (aRMG)
+        ' table further down in the email.
+
+        vslVBase = VslBaseName(vslV)
+        vslVKey = UCase$(Trim$(vslVBase))
+        bthV = UCase$(Trim$(bth))
+
+        wsOut.Cells(outRow, 1).Value = wsV.Cells(rv, colVSL_V).Value
+        wsOut.Cells(outRow, 2).Value = wsV.Cells(rv, colTRMNL).Value
+        wsOut.Cells(outRow, 3).Value = wsV.Cells(rv, colBTH).Value
+        wsOut.Cells(outRow, 4).Value = wsV.Cells(rv, colETB_V).Value
+        If colETU_V > 0 Then wsOut.Cells(outRow, 5).Value = wsV.Cells(rv, colETU_V).Value
+        If colDecl > 0 Then wsOut.Cells(outRow, 6).Value = wsV.Cells(rv, colDecl).Value
+        If colDisc > 0 Then wsOut.Cells(outRow, 7).Value = wsV.Cells(rv, colDisc).Value
+        If colLoad > 0 Then wsOut.Cells(outRow, 8).Value = wsV.Cells(rv, colLoad).Value
+        If colDeclLR > 0 Then wsOut.Cells(outRow, 9).Value = wsV.Cells(rv, colDeclLR).Value
+        If colActLR > 0 Then wsOut.Cells(outRow, 10).Value = wsV.Cells(rv, colActLR).Value
+
+        foundYard = False
+        If Len(bthV) > 0 Then
+            k = bthV & "|" & vslVKey
+            If dictYard.Exists(k) Then arrO = dictYard(k): foundYard = True
+        End If
+        If Not foundYard Then
+            If dictYard.Exists(vslVKey) Then arrO = dictYard(vslVKey): foundYard = True
+        End If
+        If foundYard Then
+            wsOut.Cells(outRow, overColStart).Value = arrO(0)
+            wsOut.Cells(outRow, overColStart + 1).Value = arrO(1)
+            wsOut.Cells(outRow, overColStart + 2).Value = arrO(2)
+            matchedYard = matchedYard + 1
+        Else
+            If Len(unmatchedList) < 3000 Then
+                unmatchedList = unmatchedList & "YARD: " & bthV & "  " & vslV & vbCrLf
+            End If
+        End If
+
+        foundLoad = False
+        If dictLoad.Exists(vslVKey) Then arrL = dictLoad(vslVKey): foundLoad = True
+        If foundLoad Then
+            wsOut.Cells(outRow, overColStart + 3).Value = arrL(0)
+            wsOut.Cells(outRow, overColStart + 4).Value = arrL(1)
+            wsOut.Cells(outRow, overColStart + 5).Value = arrL(2)
+            matchedLoad = matchedLoad + 1
+        Else
+            If Len(unmatchedList) < 3000 Then
+                unmatchedList = unmatchedList & "LOAD: " & vslV & vbCrLf
+            End If
+        End If
+
+        outRow = outRow + 1
+NextV:
+    Next rv
+
+    If outRow > 2 Then
+        wsOut.Range(wsOut.Cells(2, overColStart), wsOut.Cells(outRow - 1, overColStart + 2)).NumberFormat = "0.00%"
+        wsOut.Range(wsOut.Cells(2, 4), wsOut.Cells(outRow - 1, 4)).NumberFormat = "d/m/yyyy h:mm"
+        wsOut.Range(wsOut.Cells(2, 5), wsOut.Cells(outRow - 1, 5)).NumberFormat = "d/m/yyyy h:mm"
+    End If
+    wsOut.Columns.AutoFit
+    wsOut.Range("A1").AutoFilter
+
+    Dim loadWbName As String: loadWbName = IIf(wbL Is Nothing, "(not found)", wbL.Name)
+    Dim svcWbName  As String: svcWbName = IIf(wbS Is Nothing, "(not found)", wbS.Name)
+
+    Dim filterNote As String
+    If Len(filterStr) > 0 Then
+        filterNote = "Vessel filter(s)   : " & Replace(filterStr, "|", ", ") & vbCrLf
+    End If
+    If hasDateFilter Then
+        filterNote = filterNote & "Date filter (Long Haul table only) : " & _
+                     DateFilterDisplayText(hasDateFilter, dateFrom, dateTo) & vbCrLf
+    End If
+
+    Dim summary As String
+    summary = "FINAL sheet built in  : " & wbV.Name & vbCrLf & _
+              filterNote & _
+              "Load_Vessel_List file : " & loadWbName & vbCrLf & _
+              "Servicing file        : " & svcWbName & vbCrLf & _
+              "Load dict entries     : " & dictLoad.Count & vbCrLf & _
+              "Total rows output     : " & (outRow - 2) & vbCrLf & _
+              "Yard matches          : " & matchedYard & vbCrLf & _
+              "Load_VSL matches      : " & matchedLoad & vbCrLf & _
+              "Yard dict entries     : " & dictYard.Count
+    If Len(unmatchedList) > 0 Then
+        summary = summary & vbCrLf & vbCrLf & "--- Unmatched rows ---" & vbCrLf & unmatchedList
+    End If
+    MsgBox summary, vbInformation, "Build FINAL - Complete"
+
+CleanExit:
+    Application.EnableEvents = True
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    Exit Sub
+FailSafe:
+    Application.EnableEvents = True
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    MsgBox "Error " & Err.Number & ": " & Err.Description, vbExclamation, "Build FINAL - Error"
+End Sub
+
+'========================================================
+' MAIN 3: SEND EMAIL
+'========================================================
+Private Sub Macro_Send_Email_PSA( _
+    ByVal wsSvcDirect As Worksheet, _
+    ByVal filterStr As String, _
+    Optional ByVal hasDateFilter As Boolean = False, _
+    Optional ByVal dateFrom As Date = 0, _
+    Optional ByVal dateTo As Date = 0, _
+    Optional ByVal runLoadVessel As Boolean = True, _
+    Optional ByVal runSelfService As Boolean = True, _
+    Optional ByVal runLongHaul As Boolean = True, _
+    Optional ByVal ssHasDateFilter As Boolean = False, _
+    Optional ByVal ssDateFrom As Date = 0, _
+    Optional ByVal ssDateTo As Date = 0, _
+    Optional ByVal ssBlockFilterStr As String = "")
+
+    Dim eApp As Object
+    Dim eItem As Object
+    Dim wsFinal As Worksheet
+    Dim lastCol As Long
+    Dim i As Long, j As Long
+    Dim htmlBody As String
+    Dim cellVal As Variant
+    Dim formattedVal As String
+    Dim headerText As String
+    Dim hasOverstowValue As Boolean
+    Dim toAddr As String
+    Dim x As Double
+    Dim blueHeaders As Variant
+    Dim hdrVal As String
+    Dim hdrLower As String
+    Dim isBlueCol As Boolean
+    Dim b As Long
+    Dim mainLastRow As Long
+
+    On Error Resume Next
+    Set eApp = GetObject(, "Outlook.Application")
+    If eApp Is Nothing Then Set eApp = CreateObject("Outlook.Application")
+    On Error GoTo 0
+    Set eItem = eApp.CreateItem(0)
+
+    Set wsFinal = Nothing
+    If runLoadVessel Then
+        On Error Resume Next
+        Set wsFinal = ActiveWorkbook.Worksheets("FINAL")
+        On Error GoTo 0
+        If wsFinal Is Nothing Then
+            MsgBox "Sheet 'FINAL' not found in active workbook.", vbCritical
+            Exit Sub
+        End If
+    End If
+
+    '--- Servicing source ---
+    Dim wsSvc As Worksheet
+    Set wsSvc = wsSvcDirect   ' may be Nothing - that's fine
+
+    blueHeaders = Array("%overstow_inclr", "%overstow_outclr", "%overstow", _
+                        "load overstow", "portmark overstow", "mix weight overstow")
+
+    Dim hiddenEmailCols As Variant
+    hiddenEmailCols = Array("load overstow", "portmark overstow", "mix weight overstow")
+
+    htmlBody = "<html><body style='font-family:Calibri;font-size:11pt;'>"
+
+    htmlBody = htmlBody & "<p>Dear YP / SP team,</p>"
+    htmlBody = htmlBody & "<p>Below are the critical vessels for the incoming shifts of the respective terminals.</p>"
+    htmlBody = htmlBody & "<p>Kindly assist to review shifting out from upcoming servicing blocks and any advance overstows rectification for the priority vessels.</p>"
+
+    If runLoadVessel Then
+
+    mainLastRow = wsFinal.Cells(wsFinal.Rows.Count, 1).End(xlUp).Row
+    lastCol = wsFinal.Cells(1, wsFinal.Columns.Count).End(xlToLeft).Column
+
+    '=== VESSEL FOCUS CARDS ===
+    htmlBody = htmlBody & BuildVesselCardsHtml(ThisWorkbook.Path, filterStr)
+    htmlBody = htmlBody & "<div style='height:20px;'>&nbsp;</div>"
+
+    '=== TABLE 1: MAIN OVERSTOW TABLE ===
+    Dim colTRMNL As Long
+    colTRMNL = FindColByHeader(wsFinal, 1, "TRMNL")
+
+    '--- Group rows by terminal: PPT4 (TRMNL = P4SE) then PPT56 (TRMNL = P56SE) ---
+    Dim termGroups As Variant, termLabels As Variant, g As Long
+    termGroups = Array("PPT4", "P56SE")
+    termLabels = Array("PPT4", "PPT56")
+
+    For g = LBound(termGroups) To UBound(termGroups)
+        Dim groupHasRows As Boolean
+        groupHasRows = False
+        If colTRMNL > 0 Then
+            For i = 2 To mainLastRow
+                If StrComp(Trim$(CStr(wsFinal.Cells(i, colTRMNL).Value)), CStr(termGroups(g)), vbTextCompare) = 0 Then
+                    If RowQualifiesOverstow(wsFinal, i, lastCol) Then
+                        groupHasRows = True
+                        Exit For
+                    End If
+                End If
+            Next i
+        End If
+
+        If groupHasRows Then
+            '--- Heading above this group's table ---
+            htmlBody = htmlBody & "<span style='display:block;font-family:Calibri;font-size:11pt;font-weight:bold;color:#1F3864;margin-top:20px;margin-bottom:6px;'>" & _
+                       HtmlEncode(CStr(termLabels(g))) & "</span>"
+
+            '--- This group's own table ---
+            htmlBody = htmlBody & "<table border='1' cellpadding='8' width=100% cellspacing='0' style='border-collapse:collapse;" & _
+                       "font-family:Calibri;font-size:10.5pt;margin-top:8px;'>"
+
+            htmlBody = htmlBody & "<tr style='background-color:#1F3864;color:#FFFFFF;font-weight:bold;text-align:center;'>"
+            For j = 1 To lastCol
+                hdrVal = CStr(wsFinal.Cells(1, j).Value)
+                If Not IsInArray(LCase$(Trim$(hdrVal)), hiddenEmailCols) Then
+                    htmlBody = htmlBody & "<th>" & HtmlEncode(hdrVal) & "</th>"
+                End If
+            Next j
+            htmlBody = htmlBody & "</tr>"
+
+            For i = 2 To mainLastRow
+                If StrComp(Trim$(CStr(wsFinal.Cells(i, colTRMNL).Value)), CStr(termGroups(g)), vbTextCompare) <> 0 Then GoTo NextRowG
+                If Not RowQualifiesOverstow(wsFinal, i, lastCol) Then GoTo NextRowG
+
+                htmlBody = htmlBody & "<tr style='background-color:#F3E5F5;'>"
+                For j = 1 To lastCol
+                    cellVal = wsFinal.Cells(i, j).Value
+                    headerText = LCase$(Trim$(CStr(wsFinal.Cells(1, j).Value)))
+                    If IsInArray(headerText, hiddenEmailCols) Then GoTo NextCol
+                    formattedVal = ""
+                    Select Case headerText
+                        Case "%overstow", "%overstow_inclr", "%overstow_outclr"
+                            If Trim$(CStr(cellVal)) <> "" And IsNumeric(cellVal) Then
+                                x = CDbl(cellVal)
+                                If x <= 1 Then
+                                    formattedVal = Format(x, "0%")
+                                ElseIf x <= 100 Then
+                                    formattedVal = Format(x / 100#, "0.00%")
+                                Else
+                                    formattedVal = Format(x, "0.00%")
+                                End If
+                            End If
+                            htmlBody = htmlBody & "<td align='center'>" & HtmlEncode(formattedVal) & "</td>"
+                        Case Else
+                            htmlBody = htmlBody & "<td>" & HtmlEncode(CStr(cellVal)) & "</td>"
+                    End Select
+NextCol:
+                Next j
+                htmlBody = htmlBody & "</tr>"
+NextRowG:
+            Next i
+
+            htmlBody = htmlBody & "</table>"
+        End If
+    Next g
+
+    '=== TABLE 2: SERVICING TABLE ===
+    If Not wsSvc Is Nothing Then
+        Dim hdrSvc As Long
+        hdrSvc = FindHeaderRow(wsSvc, "Vsl_Voy2", 20)
+        If hdrSvc = 0 Then hdrSvc = FindHeaderRow(wsSvc, "Block", 20)
+        If hdrSvc = 0 Then hdrSvc = 1
+
+        Dim colSvcVsl As Long
+        colSvcVsl = FindColAny(wsSvc, hdrSvc, Array("Vsl_Voy2", "Vsl_Voy", "VSL", "Vessel"))
+
+        Dim svcLastColE As Long
+        Dim svcLastRowE As Long
+        svcLastColE = wsSvc.Cells(hdrSvc, wsSvc.Columns.Count).End(xlToLeft).Column
+        svcLastRowE = wsSvc.Cells(wsSvc.Rows.Count, 1).End(xlUp).Row
+
+        Dim svcRows()   As Long
+        Dim svcRowCount As Long
+        svcRowCount = 0
+        ReDim svcRows(1 To svcLastRowE)
+
+        Dim iSvc As Long
+        Dim hasFilter As Boolean
+        hasFilter = (Len(filterStr) > 0)
+
+        Dim dataCheckStartCol As Long
+        dataCheckStartCol = colSvcVsl + 1
+        If dataCheckStartCol < 1 Or dataCheckStartCol > svcLastColE Then dataCheckStartCol = 3
+
+        For iSvc = hdrSvc + 1 To svcLastRowE
+            Dim isTotalSvc As Boolean
+            isTotalSvc = InStr(1, LCase$(CStr(wsSvc.Cells(iSvc, 1).Value)), "total", vbTextCompare) > 0
+
+            If Not ServicingRowHasData(wsSvc, iSvc, dataCheckStartCol, svcLastColE) Then GoTo NextSvcRow
+
+            If isTotalSvc Then
+                svcRowCount = svcRowCount + 1
+                svcRows(svcRowCount) = iSvc
+            ElseIf hasFilter Then
+                Dim rowMatchesSvc As Boolean
+                rowMatchesSvc = False
+                If colSvcVsl > 0 Then
+                    rowMatchesSvc = MatchesAnyVessel( _
+                        CleanText(wsSvc.Cells(iSvc, colSvcVsl).Value), filterStr)
+                Else
+                    Dim jSvc As Long
+                    For jSvc = 1 To svcLastColE
+                        If MatchesAnyVessel(CStr(wsSvc.Cells(iSvc, jSvc).Value), filterStr) Then
+                            rowMatchesSvc = True: Exit For
+                        End If
+                    Next jSvc
+                End If
+                If rowMatchesSvc Then
+                    svcRowCount = svcRowCount + 1
+                    svcRows(svcRowCount) = iSvc
+                End If
+            Else
+                svcRowCount = svcRowCount + 1
+                svcRows(svcRowCount) = iSvc
+            End If
+NextSvcRow:
+        Next iSvc
+
+        Dim hasActualSvc As Boolean
+        Dim r As Long
+
+        hasActualSvc = False
+
+        For r = 1 To svcRowCount
+            If InStr(1, UCase$(Trim$(CStr(wsSvc.Cells(svcRows(r), 1).Value))), "TOTAL") = 0 Then
+                If Trim$(CStr(wsSvc.Cells(svcRows(r), colSvcVsl).Value)) <> "" Then
+                    hasActualSvc = True
+                    Exit For
+                End If
+            End If
+        Next r
+
+        If svcLastColE > 0 And hasActualSvc Then
+            htmlBody = htmlBody & "<br><br><p><b>Servicing:</b></p>"
+            htmlBody = htmlBody & "<table border='1' cellpadding='10' cellspacing='0' width='700' " & _
+                       "style='border-collapse:collapse;'>"
+
+            Dim jj As Long
+            htmlBody = htmlBody & "<colgroup>"
+            For jj = 1 To svcLastColE
+                If jj = 1 Then
+                    htmlBody = htmlBody & "<col width='100'>"
+                ElseIf jj = 2 Then
+                    htmlBody = htmlBody & "<col width='480'>"
+                Else
+                    htmlBody = htmlBody & "<col width='120'>"
+                End If
+            Next jj
+            htmlBody = htmlBody & "</colgroup>"
+
+            htmlBody = htmlBody & "<tr><td colspan='" & svcLastColE & "' width='700' " & _
+                       "style='background-color:#FF8C00;color:#FFFFFF;font-weight:bold;" & _
+                       "text-align:center;font-size:12pt;padding:10px;'>Servicing</td></tr>"
+
+            htmlBody = htmlBody & "<tr style='font-size:1px;line-height:1px;'>"
+            For jj = 1 To svcLastColE
+                If jj = 1 Then
+                    htmlBody = htmlBody & "<td width='100' style='padding:0;'>&nbsp;</td>"
+                ElseIf jj = 2 Then
+                    htmlBody = htmlBody & "<td width='480' style='padding:0;'>&nbsp;</td>"
+                Else
+                    htmlBody = htmlBody & "<td width='120' style='padding:0;'>&nbsp;</td>"
+                End If
+            Next jj
+            htmlBody = htmlBody & "</tr>"
+
+            htmlBody = htmlBody & "<tr style='background-color:#FFD580;font-weight:bold;'>"
+            For jj = 1 To svcLastColE
+                Dim hdrSvcVal As String
+                hdrSvcVal = HtmlEncode(CStr(wsSvc.Cells(hdrSvc, jj).Value))
+                If jj = 1 Then
+                    htmlBody = htmlBody & "<th width='100' style='text-align:left;padding:10px;" & _
+                               "white-space:nowrap;'>" & hdrSvcVal & "</th>"
+                ElseIf jj = 2 Then
+                    htmlBody = htmlBody & "<th width='480' style='text-align:left;padding:10px;" & _
+                               "white-space:nowrap;'>" & hdrSvcVal & "</th>"
+                Else
+                    htmlBody = htmlBody & "<th width='120' style='text-align:center;padding:10px;" & _
+                               "white-space:nowrap;'>" & hdrSvcVal & "</th>"
+                End If
+            Next jj
+            htmlBody = htmlBody & "</tr>"
+
+            Dim isTotalRowE As Boolean
+            For r = 1 To svcRowCount
+                Dim ii As Long
+                ii = svcRows(r)
+                Dim cellValE As String
+                isTotalRowE = InStr(1, LCase$(CStr(wsSvc.Cells(ii, 1).Value)), "total", vbTextCompare) > 0
+                If isTotalRowE Then
+                    htmlBody = htmlBody & "<tr style='background-color:#FFD580;font-weight:bold;'>"
+                Else
+                    htmlBody = htmlBody & "<tr style='background-color:#FFF3E0;'>"
+                End If
+                For jj = 1 To svcLastColE
+                    Dim svcCellE As Range
+                    Set svcCellE = wsSvc.Cells(ii, jj)
+                    If IsNumeric(svcCellE.Value) And svcCellE.Value > 0 And svcCellE.Value < 1 Then
+                        cellValE = Format(svcCellE.Value, "HH:MM")
+                    Else
+                        cellValE = CStr(svcCellE.Value)
+                    End If
+                    Dim tdStyleE As String
+                    Dim tdWidthE As String
+                    If jj = 1 Then
+                        tdStyleE = "text-align:left;white-space:nowrap;padding:10px;"
+                        tdWidthE = "100"
+                    ElseIf jj = 2 Then
+                        tdStyleE = "text-align:left;white-space:nowrap;padding:10px;"
+                        tdWidthE = "480"
+                    Else
+                        tdStyleE = "text-align:center;white-space:nowrap;padding:10px;"
+                        tdWidthE = "120"
+                    End If
+                    If isTotalRowE Then
+                        htmlBody = htmlBody & "<td width='" & tdWidthE & "' style='" & tdStyleE & "'><b>" & HtmlEncode(cellValE) & "</b></td>"
+                    Else
+                        htmlBody = htmlBody & "<td width='" & tdWidthE & "' style='" & tdStyleE & "'>" & HtmlEncode(cellValE) & "</td>"
+                    End If
+                Next jj
+                htmlBody = htmlBody & "</tr>"
+            Next r
+            htmlBody = htmlBody & "</table>"
+        End If
+    End If
+
+    End If ' runLoadVessel
+
+    '=== LONG HAUL TABLE (red aRMG blocks) ===
+    If runLongHaul Then
+        htmlBody = htmlBody & BuildSelfServiceRedBlockHtml(ThisWorkbook.Path, filterStr, hasDateFilter, dateFrom, dateTo)
+    End If
+
+    '=== SELF SERVICE TABLE (PPT4 / P56SE) ===
+    If runSelfService Then
+        htmlBody = htmlBody & BuildSelfServicingHtml(ThisWorkbook.Path, filterStr, _
+                                                       ssHasDateFilter, ssDateFrom, ssDateTo, ssBlockFilterStr)
+    End If
+    htmlBody = htmlBody & "<p>Regards,<br>Operations<br>Name</p></body></html>"
+
+    toAddr = TO_ADDR_LIST
+    With eItem
+        .To = TO_ADDR_LIST
+        .cc = CC_ADDR_LIST
+        .Subject = "[P456] Incoming Shift Support for Critical & High Loading Vessels (" & _
+                   Format(Now, "dd/mm") & " D/G shift)"
+        .htmlBody = htmlBody
+        .Display
+    End With
+
+    MsgBox "Email drafted successfully.", vbInformation, "Send Email"
+End Sub
+Private Sub FilterSelfService_PageField(ByVal pt As PivotTable, ByVal fieldName As String, ByVal allowedItems As Variant)
+    Dim pf As PivotField, pi As PivotItem, a As Long, isAllowed As Boolean
+ 
+    On Error Resume Next
+    Set pf = pt.PivotFields(fieldName)
+    On Error GoTo 0
+    If pf Is Nothing Then Exit Sub
+ 
+    On Error Resume Next
+    pf.EnableMultiplePageItems = True
+    On Error GoTo 0
+ 
+    ' Show everything first so nothing stays hidden from a previous run
+    For Each pi In pf.PivotItems
+        On Error Resume Next
+        pi.Visible = True
+        On Error GoTo 0
+    Next pi
+ 
+    ' Now hide anything not in the allowed list
+    For Each pi In pf.PivotItems
+        isAllowed = False
+        For a = LBound(allowedItems) To UBound(allowedItems)
+            If StrComp(pi.Name, CStr(allowedItems(a)), vbTextCompare) = 0 Then
+                isAllowed = True
+                Exit For
+            End If
+        Next a
+        If Not isAllowed Then
+            On Error Resume Next
+            pi.Visible = False
+            On Error GoTo 0
+        End If
+    Next pi
+End Sub
+ 
+'========================================================
+' COMBINED: BUILD FINAL THEN SEND EMAIL
+'========================================================
+Private Sub Build_FINAL_Then_Email_PSA(ByVal filterStr As String, _
+                                        Optional ByVal hasDateFilter As Boolean = False, _
+                                        Optional ByVal dateFrom As Date = 0, _
+                                        Optional ByVal dateTo As Date = 0, _
+                                        Optional ByVal runLoadVessel As Boolean = True, _
+                                        Optional ByVal runSelfService As Boolean = True, _
+                                        Optional ByVal runLongHaul As Boolean = True, _
+                                        Optional ByVal ssHasDateFilter As Boolean = False, _
+                                        Optional ByVal ssDateFrom As Date = 0, _
+                                        Optional ByVal ssDateTo As Date = 0, _
+                                        Optional ByVal ssBlockFilterStr As String = "")
+
+    Dim wbSvcE As Workbook
+    Dim wsSvcE As Worksheet
+
+    If runLoadVessel Then
+        Call Build_FINAL_Smart_LOOKUP(filterStr, hasDateFilter, dateFrom, dateTo)
+        Dim wbV As Workbook
+        Set wbV = FindVesselWorkbook_OpenFirst()
+        If wbV Is Nothing Then
+            MsgBox "Cannot find the vessel workbook after building FINAL.", vbExclamation
+            Exit Sub
+        End If
+        On Error Resume Next
+        wbV.Activate
+        wbV.Worksheets("FINAL").Activate
+        On Error GoTo 0
+
+        Set wbSvcE = GetServicingWb(ThisWorkbook.Path)
+        If Not wbSvcE Is Nothing Then Set wsSvcE = GetServicingSheet(wbSvcE)
+    End If
+
+    Call Macro_Send_Email_PSA(wsSvcE, filterStr, hasDateFilter, dateFrom, dateTo, _
+                               runLoadVessel, runSelfService, runLongHaul, _
+                               ssHasDateFilter, ssDateFrom, ssDateTo, ssBlockFilterStr)
+End Sub
+'============================================================
+' DEBUG: paste into the module and run it (F5), or copy the
+' single-line versions into the Immediate Window (Ctrl+G).
+' This will show:
+'   1) How many PivotTable objects exist on the Self_Service sheet
+'   2) The name and field list of each one
+' Run this BEFORE running Setup_SelfService_Pivot again.
+'============================================================
+Public Sub Setup_SelfService_Pivot_DEBUG()
+    Dim wbSS As Workbook
+    Set wbSS = GetSelfServiceWb(ThisWorkbook.Path)
+    If wbSS Is Nothing Then
+        MsgBox "Cannot find/open Self_Service.xlsx/.xlsm.", vbExclamation
+        Exit Sub
+    End If
+ 
+    Dim wsSS As Worksheet
+    On Error Resume Next
+    Set wsSS = wbSS.Worksheets("Self_Service")
+    On Error GoTo 0
+    If wsSS Is Nothing Then
+        MsgBox "Sheet 'Self_Service' not found.", vbExclamation
+        Exit Sub
+    End If
+ 
+    Dim ptSS As PivotTable
+    Set ptSS = wsSS.PivotTables(1)   ' confirmed = 'PivotTable2', the only one
+ 
+    ptSS.ManualUpdate = True
+ 
+    ' --- Step 1: hide unrelated fields (report but don't stop on error) ---
+    Dim pf As PivotField
+    Dim wantedFields As Variant, i As Long, isWanted As Boolean
+    wantedFields = Array("Slot", "Terminal_ID", "CT", "ETB2", "ETU2", "Vsl_Voy2", "Block", "Cntr_N")
+ 
+    For Each pf In ptSS.PivotFields
+        isWanted = False
+        For i = LBound(wantedFields) To UBound(wantedFields)
+            If StrComp(pf.Name, CStr(wantedFields(i)), vbTextCompare) = 0 Then
+                isWanted = True: Exit For
+            End If
+        Next i
+        If Not isWanted Then
+            On Error Resume Next
+            pf.Orientation = xlHidden
+            If Err.Number <> 0 Then
+                MsgBox "Step1 hide '" & pf.Name & "' failed: " & Err.Number & " - " & Err.Description, vbExclamation
+                Err.Clear
+            End If
+            On Error GoTo 0
+        End If
+    Next pf
+ 
+    ' --- Step 2: Filters ---
+    On Error Resume Next
+    Err.Clear
+    ptSS.PivotFields("Slot").Orientation = xlPageField
+    If Err.Number <> 0 Then MsgBox "Slot->PageField failed: " & Err.Description: Err.Clear
+    ptSS.PivotFields("Slot").Position = 1
+    If Err.Number <> 0 Then MsgBox "Slot position failed: " & Err.Description: Err.Clear
+ 
+    ptSS.PivotFields("Terminal_ID").Orientation = xlPageField
+    If Err.Number <> 0 Then MsgBox "Terminal_ID->PageField failed: " & Err.Description: Err.Clear
+    ptSS.PivotFields("Terminal_ID").Position = 2
+    If Err.Number <> 0 Then MsgBox "Terminal_ID position failed: " & Err.Description: Err.Clear
+ 
+    ptSS.PivotFields("CT").Orientation = xlPageField
+    If Err.Number <> 0 Then MsgBox "CT->PageField failed: " & Err.Description: Err.Clear
+    ptSS.PivotFields("CT").Position = 3
+    If Err.Number <> 0 Then MsgBox "CT position failed: " & Err.Description: Err.Clear
+    On Error GoTo 0
+ 
+    ' --- Step 3: Rows ---
+    On Error Resume Next
+    Err.Clear
+    ptSS.PivotFields("ETB2").Orientation = xlRowField
+    If Err.Number <> 0 Then MsgBox "ETB2->RowField failed: " & Err.Number & " - " & Err.Description: Err.Clear
+    ptSS.PivotFields("ETB2").Position = 1
+    If Err.Number <> 0 Then MsgBox "ETB2 position failed: " & Err.Description: Err.Clear
+ 
+    ptSS.PivotFields("ETU2").Orientation = xlRowField
+    If Err.Number <> 0 Then MsgBox "ETU2->RowField failed: " & Err.Number & " - " & Err.Description: Err.Clear
+    ptSS.PivotFields("ETU2").Position = 2
+    If Err.Number <> 0 Then MsgBox "ETU2 position failed: " & Err.Description: Err.Clear
+ 
+    ptSS.PivotFields("Vsl_Voy2").Orientation = xlRowField
+    If Err.Number <> 0 Then MsgBox "Vsl_Voy2->RowField failed: " & Err.Number & " - " & Err.Description: Err.Clear
+    ptSS.PivotFields("Vsl_Voy2").Position = 3
+    If Err.Number <> 0 Then MsgBox "Vsl_Voy2 position failed: " & Err.Description: Err.Clear
+    On Error GoTo 0
+ 
+    ' --- Step 4: Columns ---
+    On Error Resume Next
+    Err.Clear
+    ptSS.PivotFields("Block").Orientation = xlColumnField
+    If Err.Number <> 0 Then MsgBox "Block->ColumnField failed: " & Err.Number & " - " & Err.Description: Err.Clear
+    ptSS.PivotFields("Block").Position = 1
+    If Err.Number <> 0 Then MsgBox "Block position failed: " & Err.Description: Err.Clear
+    On Error GoTo 0
+ 
+    ' --- Step 5: Values ---
+    On Error Resume Next
+    Err.Clear
+    Dim pfData As PivotField
+    Set pfData = ptSS.PivotFields("Cntr_N")
+    If Err.Number <> 0 Then MsgBox "Getting Cntr_N field failed: " & Err.Number & " - " & Err.Description: Err.Clear
+    pfData.Orientation = xlDataField
+    If Err.Number <> 0 Then MsgBox "Cntr_N->DataField failed: " & Err.Number & " - " & Err.Description: Err.Clear
+    pfData.Function = xlCount
+    If Err.Number <> 0 Then MsgBox "Cntr_N Function=Count failed: " & Err.Number & " - " & Err.Description: Err.Clear
+    pfData.caption = "Count of Cntr_N"
+    If Err.Number <> 0 Then MsgBox "Cntr_N caption failed: " & Err.Number & " - " & Err.Description: Err.Clear
+    On Error GoTo 0
+ 
+    ptSS.ManualUpdate = False
+ 
+    MsgBox "Done - check the Fields panel now.", vbInformation
+End Sub
+ 
+ 
+ 
+ 
+'========================================================
+' RUN ALL  <-- Entry point
+'========================================================
+Public Sub Run_All()
+
+    '=== STEP -1: Choose which section(s) to run ===
+    '   1 = Load Vessel   (main overstow table - no Distance.xlsx needed)
+    '   2 = Self Service  (PPT4 / P56SE table - vessel + date + block filters)
+    '   3 = Long Haul     (aRMG red-block table - needs Distance.xlsx + berth)
+    '   4 = Everything    (all of the above)
+    Dim modeInput As String: modeInput = "4"
+    Dim modeChoice As Integer
+    Dim runLoadVessel As Boolean, runSelfService As Boolean, runLongHaul As Boolean
+
+    Do
+        modeInput = InputBox( _
+            "Choose what to run:" & vbCrLf & vbCrLf & _
+            "1 = Load Vessel   " & vbCrLf & _
+            "2 = Self Service  " & vbCrLf & _
+            "3 = Long Haul (needs Distance.xlsx)" & vbCrLf & _
+            "4 = Everything    (all of the above)" & vbCrLf & vbCrLf & _
+            "Type 1, 2, 3 or 4.", _
+            "Choose Mode", modeInput)
+
+        If StrPtr(modeInput) = 0 Then
+            MsgBox "Cancelled.", vbInformation
+            Exit Sub
+        End If
+
+        If IsNumeric(Trim$(modeInput)) Then
+            modeChoice = CInt(Trim$(modeInput))
+        Else
+            modeChoice = 0
+        End If
+
+        If modeChoice < 1 Or modeChoice > 4 Then
+            MsgBox "Please type 1, 2, 3 or 4.", vbExclamation, "Invalid Choice"
+            modeChoice = 0
+        End If
+    Loop While modeChoice = 0
+
+    runLoadVessel = (modeChoice = 1 Or modeChoice = 4)
+    runSelfService = (modeChoice = 2 Or modeChoice = 4)
+    runLongHaul = (modeChoice = 3 Or modeChoice = 4)
+
+    '=== STEP 0 / 0.25: Prompt for vessel(s), then whichever of the ===
+    '=== Self Service (date + block) / Long Haul (date) filters apply. ===
+    ' Built as a step loop so a mistyped entry can be corrected without
+    ' cancelling the whole run: each confirmation is Yes/No/Cancel, where
+    ' No = re-enter this step (pre-filled with what you typed) and
+    ' Cancel = go BACK to the previous applicable step to amend it.
+    Dim userInput As String: userInput = ""
+    Dim filterStr As String: filterStr = ""
+    Dim tokenCount As Long
+
+    Dim ssDateInputStr As String: ssDateInputStr = ""
+    Dim ssHasDateFilter As Boolean
+    Dim ssDateFrom As Date, ssDateTo As Date
+    Dim ssBlockInputStr As String: ssBlockInputStr = ""
+    Dim ssBlockFilterStr As String: ssBlockFilterStr = ""
+
+    Dim hasDateFilter As Boolean
+    Dim dateFrom As Date, dateTo As Date
+    Dim dateInputStr As String: dateInputStr = ""
+
+    Dim dateParsedOk As Boolean
+    Dim wizStep As Integer
+    wizStep = 1
+
+    Do While wizStep >= 1 And wizStep <= 4
+
+        Select Case wizStep
+
+        Case 1
+            '--- Vessel name(s) - always needed ---
+            userInput = InputBox( _
+                "Enter vessel name(s) to process." & vbCrLf & vbCrLf & _
+                "For MULTIPLE vessels, separate with commas:" & vbCrLf & _
+                "   e.g.  EVER GIVEN, MAERSK ESSEX, COSCO" & vbCrLf & vbCrLf & _
+                "Partial names are fine (e.g. EVER matches EVER GIVEN / 123W)." & vbCrLf & vbCrLf & _
+                "Leave blank and click OK to process ALL vessels.", _
+                "Select Vessel(s)", userInput)
+
+            If StrPtr(userInput) = 0 Then
+                MsgBox "Cancelled.", vbInformation
+                Exit Sub
+            End If
+
+            Dim rawTokens() As String
+            rawTokens = Split(userInput, ",")
+
+            filterStr = ""
+            tokenCount = 0
+            Dim t As Long
+            For t = LBound(rawTokens) To UBound(rawTokens)
+                Dim tok As String
+                tok = UCase$(Trim$(rawTokens(t)))
+                If Len(tok) > 0 Then
+                    If Len(filterStr) > 0 Then filterStr = filterStr & "|"
+                    filterStr = filterStr & tok
+                    tokenCount = tokenCount + 1
+                End If
+            Next t
+
+            Dim vesselConfirm As VbMsgBoxResult
+            If tokenCount > 0 Then
+                Dim displayList As String
+                displayList = Replace(filterStr, "|", vbCrLf)
+                Dim confirmMsg As String
+                If tokenCount = 1 Then
+                    confirmMsg = "Vessel filter:  " & filterStr
+                Else
+                    confirmMsg = tokenCount & " vessel filters:" & vbCrLf & displayList
+                End If
+                confirmMsg = confirmMsg & vbCrLf & vbCrLf & _
+                    "Yes = Continue     No = Re-enter this" & vbCrLf & "Cancel = Stop"
+                vesselConfirm = MsgBox(confirmMsg, vbYesNoCancel + vbQuestion, "Confirm Vessel(s)")
+            Else
+                vesselConfirm = MsgBox( _
+                    "No vessel filter entered - ALL vessels will be processed." & vbCrLf & vbCrLf & _
+                    "Yes = Continue     No = Re-enter this" & vbCrLf & "Cancel = Stop", _
+                    vbYesNoCancel + vbQuestion, "Confirm: All Vessels")
+            End If
+
+            Select Case vesselConfirm
+                Case vbYes
+                    wizStep = 2
+                Case vbNo
+                    ' stay on Step 1 - InputBox re-opens pre-filled with userInput
+                Case Else
+                    MsgBox "Cancelled.", vbInformation
+                    Exit Sub
+            End Select
+
+        Case 2
+            '--- Self Service: optional date filter ---
+            If Not runSelfService Then wizStep = 3: GoTo NextWizStep
+
+            ssDateInputStr = InputBox( _
+                "Enter a date filter (optional) for the SELF SERVICE table" & vbCrLf & _
+                "(PPT4 / P56SE), matched against ETB2/ETU2." & vbCrLf & vbCrLf & _
+                "Format is always DD/MM/YYYY (day/month/year)." & vbCrLf & vbCrLf & _
+                "For a SINGLE DATE:" & vbCrLf & "   e.g.  15/07/2026  =  15 July 2026" & vbCrLf & vbCrLf & _
+                "For a DATE RANGE, separate with a dash:" & vbCrLf & "   e.g.  15/07/2026-20/07/2026" & vbCrLf & vbCrLf & _
+                "Leave blank and click OK to process ALL dates." & vbCrLf & vbCrLf & _
+                "(Click Cancel to go back and change the vessel name(s).)", _
+                "Self Service - Filter by Date", ssDateInputStr)
+
+            If StrPtr(ssDateInputStr) = 0 Then
+                wizStep = 1
+                GoTo NextWizStep
+            End If
+
+            dateParsedOk = ParseDateFilterInput(ssDateInputStr, ssHasDateFilter, ssDateFrom, ssDateTo)
+            If Not dateParsedOk Then
+                MsgBox "Could not understand that date. Please use DD/MM/YYYY," & vbCrLf & _
+                       "or DD/MM/YYYY-DD/MM/YYYY for a range.", vbExclamation, "Invalid Date"
+                GoTo NextWizStep
+            End If
+
+            Dim ssDateConfirm As VbMsgBoxResult
+            If ssHasDateFilter Then
+                Dim ssDateConfirmMsg As String
+                If ssDateFrom = ssDateTo Then
+                    ssDateConfirmMsg = "Self Service date filter:  " & Format(ssDateFrom, "dd/mm/yyyy (dddd)")
+                Else
+                    ssDateConfirmMsg = "Self Service date filter:  " & Format(ssDateFrom, "dd/mm/yyyy (dddd)") & _
+                                        "  to  " & Format(ssDateTo, "dd/mm/yyyy (dddd)")
+                End If
+                ssDateConfirmMsg = ssDateConfirmMsg & vbCrLf & vbCrLf & _
+                    "Yes = Continue     No = Re-enter this" & vbCrLf & "Cancel = Back to vessel(s)"
+                ssDateConfirm = MsgBox(ssDateConfirmMsg, vbYesNoCancel + vbQuestion, "Confirm Date Filter")
+            Else
+                ssDateConfirm = MsgBox( _
+                    "No date filter entered - ALL dates will be processed (Self Service table)." & vbCrLf & vbCrLf & _
+                    "Yes = Continue     No = Re-enter this" & vbCrLf & "Cancel = Back to vessel(s)", _
+                    vbYesNoCancel + vbQuestion, "Confirm: All Dates")
+            End If
+
+            Select Case ssDateConfirm
+                Case vbYes
+                    wizStep = 3
+                Case vbNo
+                    ' stay on Step 2 - InputBox re-opens pre-filled with ssDateInputStr
+                Case Else
+                    wizStep = 1   ' back to vessel step
+            End Select
+
+        Case 3
+            '--- Self Service: optional Block filter ---
+            If Not runSelfService Then wizStep = 4: GoTo NextWizStep
+
+            ssBlockInputStr = InputBox( _
+                "Enter Block(s) to filter the SELF SERVICE table (optional)." & vbCrLf & vbCrLf & _
+                "For MULTIPLE blocks, separate with commas:" & vbCrLf & _
+                "   e.g.  TA01, TB02" & vbCrLf & vbCrLf & _
+                "Leave blank and click OK to process ALL blocks." & vbCrLf & vbCrLf & _
+                "(Click Cancel to go back and change the date filter.)", _
+                "Self Service - Filter by Block", ssBlockInputStr)
+
+            If StrPtr(ssBlockInputStr) = 0 Then
+                wizStep = 2
+                GoTo NextWizStep
+            End If
+
+            Dim rawBlockTokens() As String
+            rawBlockTokens = Split(ssBlockInputStr, ",")
+
+            ssBlockFilterStr = ""
+            Dim blkTokenCount As Long
+            blkTokenCount = 0
+            Dim bt As Long
+            For bt = LBound(rawBlockTokens) To UBound(rawBlockTokens)
+                Dim blkTok As String
+                blkTok = UCase$(Trim$(rawBlockTokens(bt)))
+                If Len(blkTok) > 0 Then
+                    If Len(ssBlockFilterStr) > 0 Then ssBlockFilterStr = ssBlockFilterStr & "|"
+                    ssBlockFilterStr = ssBlockFilterStr & blkTok
+                    blkTokenCount = blkTokenCount + 1
+                End If
+            Next bt
+
+            Dim ssBlockConfirm As VbMsgBoxResult
+            If blkTokenCount > 0 Then
+                ssBlockConfirm = MsgBox( _
+                    "Self Service block filter:  " & Replace(ssBlockFilterStr, "|", ", ") & vbCrLf & vbCrLf & _
+                    "Yes = Continue     No = Re-enter this" & vbCrLf & "Cancel = Back to date filter", _
+                    vbYesNoCancel + vbQuestion, "Confirm Block(s)")
+            Else
+                ssBlockConfirm = MsgBox( _
+                    "No block filter entered - ALL blocks will be processed (Self Service table)." & vbCrLf & vbCrLf & _
+                    "Yes = Continue     No = Re-enter this" & vbCrLf & "Cancel = Back to date filter", _
+                    vbYesNoCancel + vbQuestion, "Confirm: All Blocks")
+            End If
+
+            Select Case ssBlockConfirm
+                Case vbYes
+                    wizStep = 4
+                Case vbNo
+                    ' stay on Step 3 - InputBox re-opens pre-filled with ssBlockInputStr
+                Case Else
+                    wizStep = 2   ' back to self service date step
+            End Select
+
+        Case 4
+            '--- Long Haul: optional date / date-range filter ---
+            If Not runLongHaul Then wizStep = 5: GoTo NextWizStep
+
+            dateInputStr = InputBox( _
+                "Enter a date filter (optional) - applies ONLY to the Long Haul" & vbCrLf & _
+                "(aRMG red distance blocks) table, matched against ETB2/ETU2." & vbCrLf & vbCrLf & _
+                "Format is always DD/MM/YYYY (day/month/year)." & vbCrLf & vbCrLf & _
+                "For a SINGLE DATE:" & vbCrLf & "   e.g.  15/07/2026  =  15 July 2026" & vbCrLf & vbCrLf & _
+                "For a DATE RANGE, separate with a dash:" & vbCrLf & "   e.g.  15/07/2026-20/07/2026" & vbCrLf & vbCrLf & _
+                "Leave blank and click OK to process ALL dates." & vbCrLf & vbCrLf & _
+                "(Click Cancel to go back and change the previous filter.)", _
+                "Long Haul - Filter by Date", dateInputStr)
+
+            If StrPtr(dateInputStr) = 0 Then
+                wizStep = IIf(runSelfService, 3, 1)
+                GoTo NextWizStep
+            End If
+
+            dateParsedOk = ParseDateFilterInput(dateInputStr, hasDateFilter, dateFrom, dateTo)
+            If Not dateParsedOk Then
+                MsgBox "Could not understand that date. Please use DD/MM/YYYY," & vbCrLf & _
+                       "or DD/MM/YYYY-DD/MM/YYYY for a range.", vbExclamation, "Invalid Date"
+                GoTo NextWizStep
+            End If
+
+            Dim dateConfirm As VbMsgBoxResult
+            If hasDateFilter Then
+                Dim dateConfirmMsg As String
+                If dateFrom = dateTo Then
+                    dateConfirmMsg = "Long Haul date filter:  " & Format(dateFrom, "dd/mm/yyyy (dddd)")
+                Else
+                    dateConfirmMsg = "Long Haul date filter:  " & Format(dateFrom, "dd/mm/yyyy (dddd)") & _
+                                      "  to  " & Format(dateTo, "dd/mm/yyyy (dddd)")
+                End If
+                dateConfirmMsg = dateConfirmMsg & vbCrLf & vbCrLf & _
+                    "Yes = Continue     No = Re-enter this" & vbCrLf & "Cancel = Back to previous filter"
+                dateConfirm = MsgBox(dateConfirmMsg, vbYesNoCancel + vbQuestion, "Confirm Date Filter")
+            Else
+                dateConfirm = MsgBox( _
+                    "No date filter entered - ALL dates will be processed (Long Haul table)." & vbCrLf & vbCrLf & _
+                    "Yes = Continue     No = Re-enter this" & vbCrLf & "Cancel = Back to previous filter", _
+                    vbYesNoCancel + vbQuestion, "Confirm: All Dates")
+            End If
+
+            Select Case dateConfirm
+                Case vbYes
+                    wizStep = 5
+                Case vbNo
+                    ' stay on Step 4 - InputBox re-opens pre-filled with dateInputStr
+                Case Else
+                    wizStep = IIf(runSelfService, 3, 1)   ' back to previous applicable step
+            End Select
+
+        End Select
+
+NextWizStep:
+    Loop
+
+    '=== STEP 0.5: Distance.xlsx + Self_Service pivots ===
+    ' Distance.xlsx is ONLY required for Long Haul. Self Service does not
+    ' need it at all.
+    Dim wbDist As Workbook
+
+    If runLongHaul Then
+        Set wbDist = GetDistanceWb(ThisWorkbook.Path)
+        If wbDist Is Nothing Then
+            MsgBox "Long Haul requires Distance.xlsx, but it could not be found in:" & vbCrLf & _
+                   ThisWorkbook.Path & vbCrLf & vbCrLf & _
+                   "Please make sure Distance.xlsx is in that folder and try again.", vbCritical
+            Exit Sub
+        End If
+        PromptDistanceBerth wbDist
+        Setup_SelfService_Pivot
+        Apply_ARMG_Block_Filter_To_SelfService wbDist
+    End If
+
+    If runSelfService Then
+        Setup_SelfServicing_Pivot ssBlockFilterStr
+    End If
+
+    '=== STEP 1-2: Yard_Buildup_Quality pivot (Load Vessel table only) ===
+    If runLoadVessel Then
+
+        Dim wbY As Workbook
+        Dim wsY As Worksheet
+        Dim pt  As PivotTable
+
+        Set wbY = GetWbByNamePart("Yard_Buildup_Quality")
+        If wbY Is Nothing Then
+            MsgBox "Cannot find Yard_Buildup_Quality workbook. Please open it first.", vbExclamation
+            Exit Sub
+        End If
+
+        Dim sh As Worksheet
+        For Each sh In wbY.Worksheets
+            If sh.PivotTables.Count > 0 Then
+                On Error Resume Next
+                Dim testPF As PivotField
+                Set testPF = sh.PivotTables(1).PivotFields("vsl2_bthTerm")
+                On Error GoTo 0
+                If Not testPF Is Nothing Then
+                    Set wsY = sh
+                    Set pt = sh.PivotTables(1)
+                    Exit For
+                End If
+            End If
+        Next sh
+
+        If pt Is Nothing Then
+            MsgBox "Cannot find pivot table with 'vsl2_bthTerm' field in Yard_Buildup_Quality.", vbExclamation
+            Exit Sub
+        End If
+
+        Application.ScreenUpdating = False
+        pt.ManualUpdate = True
+        On Error Resume Next
+        pt.PivotFields("alongSide").ClearAllFilters
+        pt.PivotFields("alongSide").CurrentPage = "(All)"
+        pt.PivotFields("doubleBerthing").ClearAllFilters
+        pt.PivotFields("doubleBerthing").CurrentPage = "(All)"
+        On Error GoTo 0
+        HidePivotFieldSafe pt, "%Small_Lot"
+        AddValueFieldSafe pt, "%Overstow", "%Overs", "0%"
+        AddValueFieldSafe pt, "%Overstow_inClr", "Overstow_in", "0.0000"
+        AddValueFieldSafe pt, "%Overstow_outClr", "Overstow_out", "0.0000"
+        ForceValuesToColumns pt
+        HidePivotFieldSafe pt, "Clrs"
+        HidePivotFieldSafe pt, "avgSlots"
+        HidePivotFieldSafe pt, "boxPerClr"
+        FilterPivot_PPT4_PPT5_ExplicitNoTuas pt
+        FilterPivot_Berth_P1_To_P41 pt
+        pt.ManualUpdate = False
+        Application.ScreenUpdating = True
+
+    End If
+
+    '=== STEP 3: Build FINAL (if needed) + Email ===
+    Call Build_FINAL_Then_Email_PSA(filterStr, hasDateFilter, dateFrom, dateTo, _
+                                     runLoadVessel, runSelfService, runLongHaul, _
+                                     ssHasDateFilter, ssDateFrom, ssDateTo, ssBlockFilterStr)
+
+End Sub
+
+
+
+
